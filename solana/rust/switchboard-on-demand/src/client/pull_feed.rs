@@ -109,6 +109,11 @@ pub struct OracleResponse {
     pub recovery_id: u8,
 }
 
+fn has_failure_error(error: &str) -> bool {
+    let trimmed = error.trim();
+    !trimmed.is_empty() && trimmed != "[]"
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct FetchUpdateParams {
     pub feed: Pubkey,
@@ -146,6 +151,12 @@ pub struct SolanaSubmitSignaturesParams {
     pub payer: Pubkey,
 }
 
+/// Legacy client helpers for classic PullFeed accounts.
+///
+/// New Solana/SVM feed-hash integrations should use managed quote-program
+/// updates and read canonical `SwitchboardQuote` accounts. These helpers
+/// submit through the classic PullFeed account path and require queue/gateway
+/// support for the legacy secp256k1 update flow.
 pub struct PullFeed;
 
 impl PullFeed {
@@ -217,6 +228,11 @@ impl PullFeed {
         Ok(submit_ix)
     }
 
+    /// Fetches an update instruction for a classic PullFeed account.
+    ///
+    /// This is a legacy compatibility path that submits to the classic
+    /// PullFeed program account. New feed-hash integrations should use managed
+    /// quote-program updates and canonical `SwitchboardQuote` accounts.
     pub async fn fetch_update_ix(
         context: Arc<SbContext>,
         client: &RpcClient,
@@ -316,6 +332,13 @@ impl PullFeed {
             })
             .collect();
 
+        let usable_oracle_responses: Vec<OracleResponse> = oracle_responses
+            .iter()
+            .filter(|response| response.value.is_some() && !has_failure_error(&response.error))
+            .cloned()
+            .collect();
+        num_successes = usable_oracle_responses.len();
+
         if params.debug.unwrap_or(false) {
             println!("priceSignatures: {:?}", price_signatures);
         }
@@ -328,7 +351,7 @@ impl PullFeed {
 
         let submit_signatures_ix = PullFeed::get_solana_submit_signatures_ix(
             latest_slot.slot,
-            oracle_responses.clone(),
+            usable_oracle_responses.clone(),
             SolanaSubmitSignaturesParams {
                 feed: params.feed,
                 queue: feed_data.queue,
@@ -337,7 +360,10 @@ impl PullFeed {
         )
         .context("PullFeed.fetchUpdateIx: Failed to create submit signatures instruction")?;
 
-        let oracle_keys: Vec<Pubkey> = oracle_responses.iter().map(|x| x.oracle).collect();
+        let oracle_keys: Vec<Pubkey> = usable_oracle_responses
+            .iter()
+            .map(|x| x.oracle)
+            .collect();
         let feed_key = [params.feed];
         let queue_key = [feed_data.queue];
 
@@ -357,9 +383,14 @@ impl PullFeed {
         Ok((submit_signatures_ix, oracle_responses, num_successes, luts))
     }
 
-    /// Fetch the oracle responses for multiple feeds via the consensus endpoint,
+    /// Fetch the oracle responses for multiple legacy PullFeed accounts via the consensus endpoint,
     /// build the necessary secp256k1 verification instruction and the feed update instruction,
     /// and return these instructions along with the required lookup tables.
+    ///
+    /// This is a legacy compatibility path that requires queue/gateway support
+    /// for the classic secp256k1 PullFeed update flow. New feed-hash
+    /// integrations should use managed quote-program updates and canonical
+    /// `SwitchboardQuote` accounts.
     ///
     /// # Arguments
     /// * `context` - Shared context holding caches for feeds, jobs, and lookup tables.
@@ -590,5 +621,53 @@ impl PullFeed {
         let ixs = vec![secp_ix, submit_ix];
 
         Ok((ixs, luts))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn has_failure_error_ignores_blank_and_bracket_wrapped_values() {
+        assert!(!has_failure_error(""));
+        assert!(!has_failure_error("   "));
+        assert!(!has_failure_error("[]"));
+        assert!(has_failure_error("Stale submission"));
+    }
+
+    #[test]
+    fn usable_response_count_requires_an_actual_value_and_no_failure_error() {
+        let oracle = Pubkey::new_unique();
+        let responses = vec![
+            OracleResponse {
+                value: Some(Decimal::from_i128_with_scale(1, 0)),
+                error: String::new(),
+                oracle,
+                signature: [0; 64],
+                recovery_id: 0,
+            },
+            OracleResponse {
+                value: Some(Decimal::from_i128_with_scale(2, 0)),
+                error: "Stale submission".to_string(),
+                oracle,
+                signature: [0; 64],
+                recovery_id: 0,
+            },
+            OracleResponse {
+                value: None,
+                error: String::new(),
+                oracle,
+                signature: [0; 64],
+                recovery_id: 0,
+            },
+        ];
+
+        let usable = responses
+            .iter()
+            .filter(|response| response.value.is_some() && !has_failure_error(&response.error))
+            .count();
+
+        assert_eq!(usable, 1);
     }
 }

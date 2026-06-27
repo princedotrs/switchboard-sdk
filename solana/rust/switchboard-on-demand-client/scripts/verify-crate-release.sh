@@ -2,7 +2,7 @@
 set -euo pipefail
 
 repo_root="$(git rev-parse --show-toplevel)"
-crate_rel="solana/rust/switchboard-on-demand-client"
+crate_rel="rust/switchboard-on-demand-client"
 crate_dir="$repo_root/$crate_rel"
 manifest="$crate_dir/Cargo.toml"
 
@@ -54,7 +54,7 @@ if (!info.git) {
   throw new Error('missing git metadata in .cargo_vcs_info.json');
 }
 
-if (info.git.dirty === true) {
+if (info.git.dirty !== false) {
   throw new Error('crate package was built from a dirty git state');
 }
 

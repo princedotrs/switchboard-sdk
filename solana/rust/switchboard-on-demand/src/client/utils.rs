@@ -17,7 +17,11 @@ use crate::solana_compat::solana_sdk::transaction::VersionedTransaction;
 use crate::solana_compat::compute_budget::ComputeBudgetInstruction;
 use crate::solana_compat::hash::Hash;
 use crate::solana_compat::solana_client::nonblocking::rpc_client::RpcClient;
-use crate::solana_compat::address_lookup_table::AddressLookupTableAccount;
+use crate::solana_compat::{
+    address_lookup_table::AddressLookupTableAccount,
+    to_message_address_lookup_table_account,
+    MessageAddressLookupTableAccount,
+};
 use crate::solana_compat::solana_sdk::message::VersionedMessage::V0;
 
 pub async fn ix_to_tx_v0(
@@ -67,12 +71,10 @@ pub async fn ix_to_tx_v0(
     final_ixs.extend_from_slice(ixs);
 
     // Convert AddressLookupTableAccount types
-    let converted_luts: Vec<crate::solana_compat::MessageAddressLookupTableAccount> = luts.iter().map(|lut| {
-        crate::solana_compat::MessageAddressLookupTableAccount {
-            key: lut.key.to_bytes().into(),
-            addresses: lut.addresses.iter().map(|addr| addr.to_bytes().into()).collect(),
-        }
-    }).collect();
+    let converted_luts: Vec<MessageAddressLookupTableAccount> = luts
+        .iter()
+        .map(to_message_address_lookup_table_account)
+        .collect();
 
     // Convert instructions to anchor-client types
     let converted_ixs: Vec<crate::solana_compat::solana_sdk::instruction::Instruction> = final_ixs.iter().map(|ix| {
@@ -125,12 +127,10 @@ async fn estimate_compute_units(rpc_client: &RpcClient, ixs: &[Instruction], lut
     ixs.insert(0, compute_limit_ix_converted);
 
     // Convert AddressLookupTableAccount types for this function too
-    let converted_luts: Vec<crate::solana_compat::MessageAddressLookupTableAccount> = luts.iter().map(|lut| {
-        crate::solana_compat::MessageAddressLookupTableAccount {
-            key: lut.key.to_bytes().into(),
-            addresses: lut.addresses.iter().map(|addr| addr.to_bytes().into()).collect(),
-        }
-    }).collect();
+    let converted_luts: Vec<MessageAddressLookupTableAccount> = luts
+        .iter()
+        .map(to_message_address_lookup_table_account)
+        .collect();
 
     // Convert instructions to anchor-client types
     let converted_ixs: Vec<crate::solana_compat::solana_sdk::instruction::Instruction> = ixs.iter().map(|ix| {

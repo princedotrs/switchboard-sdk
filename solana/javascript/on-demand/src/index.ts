@@ -51,21 +51,29 @@
  * });
  * ```
  *
- * ### Feed-Based Updates
+ * ### Current Feed-Hash Updates
  *
  * ```typescript
- * // Create a persistent feed account
- * const [pullFeed, feedKp] = PullFeed.generate(program);
- * const { feedId } = await crossbar.storeOracleFeed(oracleFeed);
- * await pullFeed.initIx({
- *   name: "BTC/USD",
- *   queue: queuePubkey,
- *   feedHash: Buffer.from(feedId.replace('0x', ''), 'hex'),
- * });
+ * import * as sb from '@switchboard-xyz/on-demand';
+ * import { CrossbarClient } from '@switchboard-xyz/common';
  *
- * // Update the feed
- * const [updateIx] = await pullFeed.fetchUpdateIx();
+ * const crossbar = CrossbarClient.default();
+ * const queue = await sb.Queue.loadDefault(program);
+ * const feedHash = '0xef0d8b6fcd0104e3e75096912fc8e1e432893da4f18faedaacca7e5875da620f';
+ *
+ * // Derive the quote-program account for reading after the managed update lands.
+ * const [quoteAccount] = sb.OracleQuote.getCanonicalPubkey(queue.pubkey, [feedHash]);
+ *
+ * // Fetch Ed25519 verification and quote-program update instructions.
+ * const updateIxs = await queue.fetchManagedUpdateIxs(crossbar, [feedHash], {
+ *   numSignatures: 3,
+ *   payer: payer.publicKey,
+ * });
  * ```
+ *
+ * Classic PullFeed account updates use legacy compatibility APIs such as
+ * `PullFeed.fetchUpdateIx()` and require queue/gateway support for the
+ * backward-compatible secp256k1 flow.
  *
  * ## Core Concepts
  *
@@ -87,6 +95,7 @@ export * from './event-utils/index.js';
 export * as EVM from './evm/index.js';
 export * from './instruction-utils/index.js';
 export * from './oracle-interfaces/index.js';
+export * from './randomness-inspection.js';
 export * from './sysvars/index.js';
 export * from './utils/index.js';
 // export type {

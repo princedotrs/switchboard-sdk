@@ -1,14 +1,24 @@
 module switchboard::create_feed_action {
+    use switchboard::aggregator;
     use switchboard::aggregator_init_action;
     use switchboard::aggregator_add_job_action;
+    use switchboard::aggregator_open_round_action;
+    use switchboard::crank;
+    use switchboard::crank_init_action;
     use switchboard::job_init_action;
     use switchboard::lease_init_action;
     use switchboard::crank_push_action;
     use switchboard::oracle_queue;
+    use switchboard::oracle_queue_init_action;
     use switchboard::permission_init_action;
     use switchboard::permission_set_action;
     use switchboard::permission;
+    use switchboard::switchboard_init_action;
     use aptos_framework::account;
+    use aptos_framework::aptos_coin::{Self, AptosCoin};
+    use aptos_framework::block;
+    use aptos_framework::timestamp;
+    use std::coin;
     use std::signer;
     use std::vector;
     use std::bcs;
@@ -330,12 +340,201 @@ module switchboard::create_feed_action {
             );
         };
 
-        if (!disable_crank) {
+        if (!disable_crank && aggregator_open_round_action::has_queue_usage_permission<CoinType>(aggregator_addr)) {
             crank_push_action::run<CoinType>(
                 &account,
                 crank_addr, 
                 aggregator_addr,
             );
         }
+    }
+
+    #[test_only]
+    fun setup_permissioned_queue<CoinType>(
+        queue_account: signer,
+        queue_authority: address,
+        crank_account: signer,
+    ) {
+        let queue_addr = signer::address_of(&queue_account);
+        switchboard_init_action::run(account::create_account_for_test(@switchboard));
+        switchboard_init_action::add_switchboard_events(account::create_account_for_test(@switchboard));
+        switchboard_init_action::add_switchboard_read_events(account::create_account_for_test(@switchboard));
+        oracle_queue_init_action::run<CoinType>(
+            queue_account,
+            queue_authority,
+            b"Permissioned Queue",
+            b"",
+            60,
+            1,
+            0,
+            false,
+            1,
+            0,
+            0,
+            0,
+            0,
+            false,
+            false,
+            false,
+            false,
+            32,
+            0,
+            0,
+            0,
+            0,
+        );
+        crank_init_action::run<CoinType>(crank_account, queue_addr);
+    }
+
+    #[test_only]
+    fun run_default_feed<CoinType>(
+        account: signer,
+        authority: address,
+        queue_addr: address,
+        crank_addr: address,
+        load_amount: u64,
+        seed: address,
+    ) {
+        run<CoinType>(
+            account,
+            authority,
+            b"Feed",
+            b"",
+            queue_addr,
+            1,
+            1,
+            1,
+            5,
+            0,
+            0,
+            0,
+            0,
+            0,
+            false,
+            0,
+            0,
+            @switchboard,
+            vector::empty<address>(),
+            false,
+            load_amount,
+            b"",
+            b"",
+            b"",
+            0,
+            b"",
+            b"",
+            b"",
+            0,
+            b"",
+            b"",
+            b"",
+            0,
+            b"",
+            b"",
+            b"",
+            0,
+            b"",
+            b"",
+            b"",
+            0,
+            b"",
+            b"",
+            b"",
+            0,
+            b"",
+            b"",
+            b"",
+            0,
+            b"",
+            b"",
+            b"",
+            0,
+            crank_addr,
+            seed,
+        );
+    }
+
+    #[test(
+        aptos_framework = @0x1,
+        _switchboard = @0x55,
+        queue = @0x56,
+        queue_authority = @0x57,
+        crank = @0x58,
+        creator = @0x59,
+    )]
+    fun test_create_feed_without_usage_permission_stays_off_crank(
+        aptos_framework: signer,
+        _switchboard: signer,
+        queue: signer,
+        queue_authority: signer,
+        crank: signer,
+        creator: signer,
+    ) {
+        timestamp::set_time_has_started_for_testing(&aptos_framework);
+        timestamp::update_global_time_for_test_secs(10);
+        account::create_account_for_test(@aptos_framework);
+        block::initialize_for_test(&aptos_framework, 1);
+
+        let queue_addr = signer::address_of(&queue);
+        let crank_addr = signer::address_of(&crank);
+        let creator_addr = signer::address_of(&creator);
+        let seed = @0xC0DE;
+        let feed_addr = account::create_resource_address(&creator_addr, bcs::to_bytes(&seed));
+
+        let (burn_cap, mint_cap) = aptos_coin::initialize_for_test(&aptos_framework);
+        coin::register<AptosCoin>(&creator);
+        coin::deposit(creator_addr, coin::mint(10, &mint_cap));
+
+        setup_permissioned_queue<AptosCoin>(queue, signer::address_of(&queue_authority), crank);
+        run_default_feed<AptosCoin>(creator, creator_addr, queue_addr, crank_addr, 10, seed);
+
+        assert!(aggregator::exist(feed_addr), 0);
+        assert!(!aggregator_open_round_action::has_queue_usage_permission<AptosCoin>(feed_addr), 1);
+        assert!(aggregator::test_crank_row_count(feed_addr) == 0, 2);
+        assert!(crank::test_size(crank_addr) == 0, 3);
+
+        coin::destroy_mint_cap(mint_cap);
+        coin::destroy_burn_cap(burn_cap);
+    }
+
+    #[test(
+        aptos_framework = @0x1,
+        _switchboard = @0x55,
+        queue = @0x56,
+        queue_authority = @0x57,
+        crank = @0x58,
+    )]
+    fun test_create_feed_with_usage_permission_auto_pushes(
+        aptos_framework: signer,
+        _switchboard: signer,
+        queue: signer,
+        queue_authority: signer,
+        crank: signer,
+    ) {
+        timestamp::set_time_has_started_for_testing(&aptos_framework);
+        timestamp::update_global_time_for_test_secs(10);
+        account::create_account_for_test(@aptos_framework);
+        block::initialize_for_test(&aptos_framework, 1);
+
+        let queue_addr = signer::address_of(&queue);
+        let crank_addr = signer::address_of(&crank);
+        let creator_addr = signer::address_of(&queue_authority);
+        let seed = @0xBEEF;
+        let feed_addr = account::create_resource_address(&creator_addr, bcs::to_bytes(&seed));
+
+        let (burn_cap, mint_cap) = aptos_coin::initialize_for_test(&aptos_framework);
+        coin::register<AptosCoin>(&queue_authority);
+        coin::deposit(creator_addr, coin::mint(10, &mint_cap));
+
+        setup_permissioned_queue<AptosCoin>(queue, creator_addr, crank);
+        run_default_feed<AptosCoin>(queue_authority, creator_addr, queue_addr, crank_addr, 10, seed);
+
+        assert!(aggregator::exist(feed_addr), 4);
+        assert!(aggregator_open_round_action::has_queue_usage_permission<AptosCoin>(feed_addr), 5);
+        assert!(aggregator::test_crank_row_count(feed_addr) == 1, 6);
+        assert!(crank::test_size(crank_addr) == 1, 7);
+
+        coin::destroy_mint_cap(mint_cap);
+        coin::destroy_burn_cap(burn_cap);
     }
 }

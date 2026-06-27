@@ -38,6 +38,10 @@ Ensure you have the following installed:
 - Cargo
 - Solana CLI tools (if interacting directly with the Solana blockchain)
 
+### Feed Parameter Units
+
+Solana gateway helper parameters named `max_variance` accept human percentages and scale by `1e9` before sending gateway requests. Raw v2 `OracleFeed.max_job_range_pct` values are already scaled integers, so `1_000_000_000` means `1%`. `min_job_responses` and `min_oracle_samples` are unscaled counts. See [Feed Parameter Units](https://docs.switchboard.xyz/custom-feeds/advanced-feed-configuration/feed-parameter-units).
+
 ### Installation
 
 Add `switchboard-on-demand` to your `Cargo.toml`:
@@ -47,7 +51,38 @@ Add `switchboard-on-demand` to your `Cargo.toml`:
 switchboard-on-demand = "0.8.0"
 ```
 
-### Using on chain
+### Current quote-program account reads
+
+New Solana/SVM feed-hash integrations should read canonical quote-program
+accounts. Quote accounts are variable-length, so parse them with
+`SwitchboardQuote`, `PackedFeedInfo`, and `QuoteVerifier` instead of fixed byte
+offsets.
+
+```rust
+use switchboard_on_demand::QuoteVerifier;
+
+pub fn read_quote<'a>(ctx: Context<YourAccounts<'a>>) -> Result<()> {
+    let quote = QuoteVerifier::new()
+        .queue(&ctx.accounts.queue)
+        .slothash_sysvar(&ctx.accounts.slothash_sysvar)
+        .ix_sysvar(&ctx.accounts.instructions_sysvar)
+        .clock_slot(ctx.accounts.clock.slot)
+        .max_age(150)
+        .verify_account(&ctx.accounts.oracle)?;
+
+    for feed in quote.feeds() {
+        msg!("Feed {}: {}", feed.hex_id(), feed.value());
+    }
+
+    Ok(())
+}
+```
+
+### Legacy PullFeed account reads
+
+`PullFeedAccountData` is the classic PullFeed account layout. Use it only for
+existing programs that already read classic PullFeed accounts. New feed-hash
+integrations should read canonical quote-program accounts instead.
 
 ```rust
 use switchboard_on_demand::PullFeedAccountData;

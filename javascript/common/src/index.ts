@@ -22,6 +22,9 @@ export {
   OracleJob,
   Task,
 } from './protos.js';
+export * from './randomness-deployments.js';
+export * from './randomness-remediation.js';
+export * from './randomness-selector.js';
 export * from './secrets.js';
 export * from './switchboard-decimal.js';
 export * from './types.js';
@@ -29,12 +32,18 @@ export * from './types/chains.js';
 export {
   CrossbarFetchResponse,
   FetchSignaturesRequest,
+  OracleInfo,
   V2ConsensusOracleResponse,
   V2MedianResponse,
   V2UpdateQuery,
   V2UpdateResponse,
 } from './types/crossbar.js';
 export type { FeedEvalResponse } from './types/gateway.js';
+export type {
+  GatewayOracleConfig,
+  HealthyOraclesResponse,
+  OracleHealthData,
+} from './types/gateway.js';
 export { sleep } from './utils/async.js';
 export * from './utils/index.js';
 export {

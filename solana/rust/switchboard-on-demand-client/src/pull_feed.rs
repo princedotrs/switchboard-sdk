@@ -18,12 +18,11 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use solana_client::nonblocking::rpc_client::RpcClient;
-use solana_sdk::{
-    instruction::{AccountMeta, Instruction},
-    message::AddressLookupTableAccount,
-    pubkey::Pubkey,
-};
-use solana_sdk_ids::system_program;
+use solana_sdk::address_lookup_table::AddressLookupTableAccount;
+use solana_sdk::instruction::AccountMeta;
+use solana_sdk::instruction::Instruction;
+use solana_sdk::pubkey::Pubkey;
+use solana_sdk::system_program;
 use std::result::Result;
 use std::sync::Arc;
 use tokio::join;
@@ -145,6 +144,12 @@ pub struct SolanaSubmitSignaturesParams {
     pub payer: Pubkey,
 }
 
+/// Legacy client helpers for classic PullFeed accounts.
+///
+/// New Solana/SVM feed-hash integrations should use managed quote-program
+/// updates and read canonical `SwitchboardQuote` accounts. These helpers
+/// submit through the classic PullFeed account path and require queue/gateway
+/// support for the legacy secp256k1 update flow.
 pub struct PullFeed;
 
 impl PullFeed {
@@ -209,6 +214,11 @@ impl PullFeed {
         Ok(submit_ix)
     }
 
+    /// Fetches an update instruction for a classic PullFeed account.
+    ///
+    /// This is a legacy compatibility path that submits to the classic
+    /// PullFeed program account. New feed-hash integrations should use managed
+    /// quote-program updates and canonical `SwitchboardQuote` accounts.
     pub async fn fetch_update_ix(
         context: Arc<SbContext>,
         client: &RpcClient,
@@ -349,9 +359,14 @@ impl PullFeed {
         Ok((submit_signatures_ix, oracle_responses, num_successes, luts))
     }
 
-    /// Fetch the oracle responses for multiple feeds via the consensus endpoint,
+    /// Fetch the oracle responses for multiple legacy PullFeed accounts via the consensus endpoint,
     /// build the necessary secp256k1 verification instruction and the feed update instruction,
     /// and return these instructions along with the required lookup tables.
+    ///
+    /// This is a legacy compatibility path that requires queue/gateway support
+    /// for the classic secp256k1 PullFeed update flow. New feed-hash
+    /// integrations should use managed quote-program updates and canonical
+    /// `SwitchboardQuote` accounts.
     ///
     /// # Arguments
     /// * `context` - Shared context holding caches for feeds, jobs, and lookup tables.

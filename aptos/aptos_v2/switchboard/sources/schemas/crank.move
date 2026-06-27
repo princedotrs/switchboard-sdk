@@ -158,4 +158,9 @@ module switchboard::crank {
         // return aggregator address (the one with the lowest timestamp)
         (popped.aggregator_addr, popped.timestamp, jitter_modifier)
     }
+
+    #[test_only]
+    public fun test_size(self: address): u64 acquires Crank {
+        vector::length(&borrow_global<Crank>(self).heap)
+    }
 }

@@ -180,7 +180,11 @@ pub struct CompactResult {
     pub slot: u64,
 }
 
-/// A representation of the data in a pull feed account.
+/// A representation of the data in a classic PullFeed account.
+///
+/// This account layout is for legacy PullFeed integrations. New Solana/SVM
+/// feed-hash integrations should read canonical quote-program accounts with
+/// the `SwitchboardQuote`/`PackedFeedInfo` types instead of this layout.
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 #[cfg_attr(feature = "anchor", derive(AnchorSerialize, AnchorDeserialize))]

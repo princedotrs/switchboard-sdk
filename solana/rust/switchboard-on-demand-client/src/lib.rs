@@ -126,7 +126,7 @@ use solana_sdk::pubkey;
 ///
 /// # Examples
 ///
-/// ```rust,no_run
+/// ```rust
 /// use switchboard_on_demand_client::is_devnet;
 ///
 /// if is_devnet() {
@@ -157,7 +157,7 @@ pub const ON_DEMAND_DEVNET_PID: Pubkey = pubkey!("Aio4gaXjXzJNVLtzwtNVmSqGKpANtX
 ///
 /// # Examples
 ///
-/// ```rust,no_run
+/// ```rust
 /// use switchboard_on_demand_client::get_switchboard_on_demand_program_id;
 ///
 /// let program_id = get_switchboard_on_demand_program_id();
@@ -225,14 +225,20 @@ pub const REWARD_POOL_VAULT_SEED: &[u8] = b"RewardPool";
 /// use solana_sdk::{
 ///     instruction::Instruction,
 ///     signature::{Keypair, Signer},
+///     system_instruction,
 ///     hash::Hash,
 /// };
 ///
 /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// let payer = Keypair::new();
+/// let recipient = Keypair::new();
 /// let recent_blockhash = Hash::default(); // In practice, fetch from RPC
 ///
-/// let instruction = Instruction::new_with_bytes(payer.pubkey(), &[], vec![]);
+/// let instruction = system_instruction::transfer(
+///     &payer.pubkey(),
+///     &recipient.pubkey(),
+///     1_000_000, // lamports
+/// );
 ///
 /// let transaction = ix_to_tx(&[instruction], &[&payer], recent_blockhash)?;
 /// # Ok(())

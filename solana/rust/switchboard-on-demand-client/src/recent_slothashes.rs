@@ -3,7 +3,7 @@ use anyhow_ext::Error as AnyhowError;
 use arrayref::array_ref;
 use bytemuck;
 use solana_client::nonblocking::rpc_client::RpcClient;
-use solana_commitment_config::CommitmentConfig;
+use solana_sdk::commitment_config::CommitmentConfig;
 use std::result::Result;
 
 #[repr(C)]

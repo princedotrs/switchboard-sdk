@@ -24,12 +24,14 @@ export type QuoteSourceScheme = 'oracle' | 'authority';
 export interface FeedInfo {
   feedHash: Buffer;
   value: bigint;
+  /** Unscaled oracle/signature quorum for this feed. */
   minOracleSamples: number;
 }
 
 export interface AuthorityFeedInfoInput {
   feedHash: string | Buffer;
   value: bigint;
+  /** Unscaled oracle/signature quorum for this feed. */
   minOracleSamples?: number;
 }
 
@@ -60,6 +62,7 @@ export interface SwitchboardQuoteJSON {
   feeds: Array<{
     feedHash: string;
     value: string;
+    /** Unscaled oracle/signature quorum for this feed. */
     minOracleSamples: number;
   }>;
   oracleIdxs: number[];
@@ -289,6 +292,12 @@ function parseAuthorityQuotePayload(
 }
 
 export class OracleQuote {
+  /**
+   * Derives the canonical quote-program account for a queue and feed hashes.
+   *
+   * New Solana/SVM feed-hash integrations should derive this account and update
+   * it with `Queue.fetchManagedUpdateIxs(...)`.
+   */
   static getCanonicalPubkey(
     queueKey: web3.PublicKey,
     feedHashes: Array<string | Buffer>,
@@ -411,6 +420,15 @@ export class OracleQuote {
     });
   }
 
+  /**
+   * Decodes a quote instruction payload.
+   *
+   * This helper parses the Ed25519 quote/instruction payload used by managed
+   * updates. It is not a stable decoder for raw stored quote-program account
+   * data, whose account layout is variable-length. For stored account parsing,
+   * use the Rust/on-chain `SwitchboardQuote` account type until a dedicated JS
+   * account decoder is provided.
+   */
   static decodeIx(instruction: web3.TransactionInstruction): SwitchboardQuote {
     if (!instruction.data || instruction.data.length === 0) {
       throw new Error('Instruction data is empty');
@@ -423,6 +441,15 @@ export class OracleQuote {
     return this.decode(buffer);
   }
 
+  /**
+   * Decodes a quote instruction payload.
+   *
+   * This helper parses the Ed25519 quote/instruction payload used by managed
+   * updates. It is not a stable decoder for raw stored quote-program account
+   * data, whose account layout is variable-length. For stored account parsing,
+   * use the Rust/on-chain `SwitchboardQuote` account type until a dedicated JS
+   * account decoder is provided.
+   */
   static decode(buffer: Buffer): SwitchboardQuote {
     if (!buffer || buffer.length === 0) {
       throw new Error('Invalid buffer: cannot be empty');

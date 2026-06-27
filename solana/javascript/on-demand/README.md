@@ -32,6 +32,7 @@ This library is compatible with both **Node.js** and **browser** environments. H
 ### Browser Usage Example
 ```typescript
 import * as sb from '@switchboard-xyz/on-demand';
+import { CrossbarClient } from '@switchboard-xyz/common';
 import { Connection, clusterApiUrl } from '@solana/web3.js';
 
 // Use browser wallet adapter instead of file-based keypair
@@ -41,19 +42,45 @@ const program = await sb.AnchorUtils.loadProgramFromConnection(
   walletAdapter // From @solana/wallet-adapter-react or similar
 );
 
-// Rest of your code works identically in browser and Node.js
-const [pullIx] = await feedAccount.fetchUpdateIx({ numSignatures: 3 });
+// Current Solana/SVM feed-hash updates use the quote program.
+const crossbar = CrossbarClient.default();
+const queue = await sb.Queue.loadDefault(program);
+const feedHash = '0xef0d8b6fcd0104e3e75096912fc8e1e432893da4f18faedaacca7e5875da620f';
+
+const [quoteAccount] = sb.OracleQuote.getCanonicalPubkey(queue.pubkey, [feedHash]);
+const updateIxs = await queue.fetchManagedUpdateIxs(crossbar, [feedHash], {
+  numSignatures: 3,
+  payer: walletAdapter.publicKey,
+});
 ```
 
 ## Getting Started
 To start building your own on-demand oracle with Switchboard, you can refer to the oracle specification in our [documentation](https://protos.docs.switchboard.xyz/protos/OracleJob).
 
+### Feed Parameter Units
+
+Solana helper methods such as `PullFeed.initIx` and `PullFeed.setConfigsIx` accept human-percent `maxVariance` values and scale them by `1e9` internally. Raw v2 `OracleFeed.maxJobRangePct` values are already scaled integers, so `1_000_000_000` means `1%`. `minJobResponses` and `minOracleSamples` are unscaled counts. See [Feed Parameter Units](https://docs.switchboard.xyz/custom-feeds/advanced-feed-configuration/feed-parameter-units).
+
 ### Example Code Snippet:
 ```typescript
-const [pullIx] = await feedAccount.fetchUpdateIx({ numSignatures: 3 });
+import * as sb from '@switchboard-xyz/on-demand';
+import { CrossbarClient } from '@switchboard-xyz/common';
+
+const crossbar = CrossbarClient.default();
+const queue = await sb.Queue.loadDefault(program);
+const feedHash = '0xef0d8b6fcd0104e3e75096912fc8e1e432893da4f18faedaacca7e5875da620f';
+
+// Derive the quote-program account that stores the verified feed value.
+const [quoteAccount] = sb.OracleQuote.getCanonicalPubkey(queue.pubkey, [feedHash]);
+
+// Fetch Ed25519 verification + quote-program verified_update instructions.
+const updateIxs = await queue.fetchManagedUpdateIxs(crossbar, [feedHash], {
+    numSignatures: 3,
+    payer: payer.publicKey,
+});
 const tx = await sb.asV0Tx({
     connection,
-    ixs: [pullIx],
+    ixs: updateIxs,
     signers: [payer],
     computeUnitPrice: 200_000,
     computeUnitLimitMultiple: 1.3,
@@ -63,6 +90,11 @@ await program.provider.connection.sendTransaction(tx, {
     preflightCommitment: "processed",
 });
 ```
+
+For new Solana/SVM feed-hash integrations, read from the derived
+`quoteAccount` after the managed update lands. The older
+`PullFeed.fetchUpdateIx()` path targets classic PullFeed accounts and requires
+legacy secp256k1-compatible queue and gateway support.
 
 ## SwitchboardSurge - Real-time Price Streaming
 
@@ -177,3 +209,27 @@ const feedHashes = [
 ];
 ```
 
+### Reading Stored Quote Accounts
+
+Stored quote-program accounts are variable-length. Do not read feed values by
+hard-coding byte offsets from a simulation or one account instance. In Rust,
+use the authoritative `SwitchboardQuote` account type and its `feeds_slice()`
+accessor; each `PackedFeedInfo` exposes `feed_id`, `feed_value`, `value()`, and
+`min_oracle_samples`.
+
+In JavaScript, `OracleQuote.decode(...)` parses the Ed25519 quote instruction
+payload used by managed updates. It is not a stable raw account decoder for
+stored quote-program account data. Until a JS account decoder is provided, use
+the Rust/on-chain quote types for stored account parsing.
+
+## Legacy PullFeed Accounts
+
+`PullFeed.fetchUpdateIx()` and `PullFeed.fetchUpdateManyIx()` are compatibility
+APIs for classic PullFeed accounts. They submit through the classic PullFeed
+program path, including `pullFeedSubmitResponseConsensus`, and use the
+backward-compatible secp256k1 signature flow by default.
+
+Use these methods only when you are maintaining an existing classic PullFeed
+integration and the target queue/gateway environment explicitly supports that
+path. New Solana/SVM custom-feed and feed-hash integrations should use
+`Queue.fetchManagedUpdateIxs(...)` and canonical `OracleQuote` accounts instead.

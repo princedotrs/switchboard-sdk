@@ -89,7 +89,11 @@ pub struct OracleSubmission {
     pub value: i128,
 }
 
-/// A representation of the data in a pull feed account.
+/// A representation of the data in a classic PullFeed account.
+///
+/// This account layout is for legacy PullFeed integrations. New Solana/SVM
+/// feed-hash integrations should read canonical quote-program accounts with
+/// the `SwitchboardQuote`/`PackedFeedInfo` types instead of this layout.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct PullFeedAccountData {

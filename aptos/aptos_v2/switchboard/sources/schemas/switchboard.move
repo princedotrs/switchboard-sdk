@@ -222,6 +222,12 @@ module switchboard::switchboard {
         );
     }
 
+    #[test_only]
+    public fun aggregator_crank_eviction_event_count(): u64 acquires SwitchboardEvents {
+        let switchboard_events = borrow_global<SwitchboardEvents>(@switchboard);
+        event::counter(&switchboard_events.aggregator_crank_eviction_events)
+    }
+
     public(friend) fun emit_oracle_reward_event(
         aggregator_address: address,
         oracle_address: address,

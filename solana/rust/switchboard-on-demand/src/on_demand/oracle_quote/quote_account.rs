@@ -62,7 +62,12 @@ impl anchor_lang::AnchorSerialize for OracleSignature {
 #[cfg(feature = "idl-build")]
 impl anchor_lang::IdlBuild for OracleSignature {}
 
-/// Switchboard oracle quote account structure
+/// Switchboard oracle quote account structure.
+///
+/// Quote accounts are variable-length because signatures, feeds, and oracle
+/// indices are length-prefixed. Consumers should parse stored account data with
+/// this type and access feed values through `feeds_slice()`/`PackedFeedInfo`;
+/// do not hard-code byte offsets from a single simulated account instance.
 ///
 /// # On-chain Layout (excluding 8-byte discriminator):
 /// ```text

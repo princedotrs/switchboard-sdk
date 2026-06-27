@@ -4,9 +4,12 @@ use crate::LUT_SIGNER_SEED;
 use crate::*;
 use anyhow_ext::anyhow;
 use anyhow_ext::Error as AnyhowError;
-use solana_address_lookup_table_interface::{instruction::*, state::AddressLookupTable};
 use solana_client::nonblocking::rpc_client::RpcClient;
-use solana_sdk::{account::Account, message::AddressLookupTableAccount, pubkey::Pubkey};
+use solana_sdk::account::Account;
+use solana_sdk::address_lookup_table::instruction::derive_lookup_table_address;
+use solana_sdk::address_lookup_table::state::AddressLookupTable;
+use solana_sdk::address_lookup_table::AddressLookupTableAccount;
+use solana_sdk::pubkey::Pubkey;
 
 pub fn find_lut_signer(k: &Pubkey) -> Pubkey {
     Pubkey::find_program_address(

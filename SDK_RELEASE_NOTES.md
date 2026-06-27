@@ -5,7 +5,31 @@ The newest release batch should stay at the top.
 
 ## Release Prep Checklist
 
+- Follow `SDK_RELEASE_FLOW.md`; release from canonical `sbv3`, not from the `switchboard-sdk` mirror.
 - Before publishing, confirm each release-note version matches the canonical `sbv3` manifest version, the final `switchboard-sdk` release-branch manifest version, and the latest published registry version.
+
+## 2026-06-27 Release Prep
+
+### `switchboard-on-demand-client@0.6.1`
+
+Status: prepared; dry-run verified.
+
+- Pins the legacy client crate to the Solana 1.18 SDK line it supports.
+- Fixes compatibility with Solana SDK module paths used by 1.18-era consumers.
+
+### `switchboard-on-demand@0.13.1`
+
+Status: prepared; dry-run pending.
+
+- Sets the Solana 2.x support floor to 2.1 and keeps Solana 3.x support below 4.x.
+- Fixes Solana 3 client feature compilation, including lookup-table message types and shared client dependencies.
+
+### `sb-on-demand-schemas@0.1.4`
+
+Status: prepared; dry-run pending.
+
+- Aligns schema crate Solana 2.x bounds with the supported 2.1+ SDK range.
+- Keeps the schema crate on the compatible `switchboard-on-demand` 0.13 release line.
 
 ## 2026-06-08 Release Prep
 

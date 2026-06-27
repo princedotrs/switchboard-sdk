@@ -13,11 +13,11 @@
  */
 
 import {
-  getCrossbarNetworkForCluster,
-  getDefaultQueueAddressForCluster,
-  getProgramIdForCluster,
-  requireSupportedSolanaCluster,
-} from '../utils/solanaCluster.js';
+  isDevnetConnection,
+  isMainnetConnection,
+  ON_DEMAND_DEVNET_PID,
+  ON_DEMAND_MAINNET_PID,
+} from '../utils';
 import { getFs } from '../utils/fs';
 
 import { Queue } from './../accounts/queue.js';
@@ -31,7 +31,7 @@ import {
   Wallet,
   web3,
 } from '@coral-xyz/anchor-31';
-import { CrossbarClient } from '@switchboard-xyz/common';
+import { CrossbarClient, CrossbarNetwork } from '@switchboard-xyz/common';
 import yaml from 'js-yaml';
 
 // Node.js-only imports - these functions will throw in browser environments
@@ -154,14 +154,11 @@ export class AnchorUtils {
     provider: Provider,
     programId?: web3.PublicKey
   ) {
-    const pid =
-      programId ??
-      getProgramIdForCluster(
-        await requireSupportedSolanaCluster(
-          provider.connection,
-          'AnchorUtils.loadProgramFromProvider'
-        )
-      );
+    const pid = await (async () => {
+      if (programId) return programId;
+      const isSolanaDevnet = await isDevnetConnection(provider.connection);
+      return isSolanaDevnet ? ON_DEMAND_DEVNET_PID : ON_DEMAND_MAINNET_PID;
+    })();
     return await Program.at(pid, provider);
   }
 
@@ -172,10 +169,9 @@ export class AnchorUtils {
    */
   static async loadProgramFromEnv(): Promise<Program> {
     const config = await AnchorUtils.loadEnv();
-    if (!config.program) {
-      throw new Error('AnchorUtils.loadEnv() did not return a program.');
-    }
-    return config.program;
+    const isDevnet = await isDevnetConnection(config.connection);
+    const pid = isDevnet ? ON_DEMAND_DEVNET_PID : ON_DEMAND_MAINNET_PID;
+    return Program.at(pid, config.provider);
   }
 
   /**
@@ -209,20 +205,22 @@ export class AnchorUtils {
     const [wallet, keypair] = await AnchorUtils.initWalletFromFile(keypairPath);
     const provider = new AnchorProvider(connection, wallet);
 
-    const cluster = await requireSupportedSolanaCluster(
-      connection,
-      'AnchorUtils.loadEnv'
-    );
-    const isMainnet = cluster === 'mainnet';
-    const network = getCrossbarNetworkForCluster(cluster);
+    const isMainnet = await isMainnetConnection(connection);
+
+    // Set the crossbar network based on the detected connection
+    const network = isMainnet
+      ? CrossbarNetwork.SolanaMainnet
+      : CrossbarNetwork.SolanaDevnet;
     crossbar.setNetwork(network);
 
-    const pid = getProgramIdForCluster(cluster);
+    const pid = isMainnet ? ON_DEMAND_MAINNET_PID : ON_DEMAND_DEVNET_PID;
 
     const program = await Program.at(pid, provider);
 
     // Create queue with the correct key based on detected network
-    const queueKey = getDefaultQueueAddressForCluster(cluster);
+    const queueKey = isMainnet
+      ? Queue.DEFAULT_MAINNET_KEY
+      : Queue.DEFAULT_DEVNET_KEY;
     const queue = new Queue(program, queueKey);
 
     // Set the network on the queue instance for future use

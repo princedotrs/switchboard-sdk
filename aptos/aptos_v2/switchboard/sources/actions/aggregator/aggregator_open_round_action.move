@@ -14,6 +14,8 @@ module switchboard::aggregator_open_round_action {
     use aptos_framework::timestamp;
 
     friend switchboard::crank_pop_action;
+    friend switchboard::crank_push_action;
+    friend switchboard::create_feed_action;
 
     struct AggregatorOpenRoundParams has copy, drop {
         aggregator_addr: address,
@@ -31,6 +33,44 @@ module switchboard::aggregator_open_round_action {
 
     public(friend) fun params(aggregator_addr: address, jitter: u64): AggregatorOpenRoundParams {
         AggregatorOpenRoundParams { aggregator_addr, jitter }
+    }
+
+    public(friend) fun has_queue_usage_permission<CoinType>(aggregator_addr: address): bool {
+        if (!aggregator::exist(aggregator_addr)) {
+            return false
+        };
+
+        let (
+            queue_addr,
+            _batch_size,
+            _min_oracle_results,
+        ) = aggregator::configs(aggregator_addr);
+        if (!oracle_queue::exist<CoinType>(queue_addr)) {
+            return false
+        };
+
+        let (
+            queue_authority,
+            _reward,
+            _open_round_reward,
+            _save_reward,
+            _save_confirmation_reward,
+            _slashing_penalty,
+            _slashing_enabled,
+            _variance_tolerance_multiplier,
+            unpermissioned_feeds_enabled,
+        ) = oracle_queue::configs(queue_addr);
+        if (unpermissioned_feeds_enabled) {
+            return true
+        };
+
+        let pkey = permission::key(&queue_authority, &queue_addr, &aggregator_addr);
+        if (!switchboard::permission_exists(pkey)) {
+            return false
+        };
+
+        let p = switchboard::permission_get(pkey);
+        permission::has(&p, permission::PERMIT_ORACLE_QUEUE_USAGE())
     }
 
     public fun simulate<CoinType>(params: AggregatorOpenRoundParams): (u64, Option<AggregatorOpenRoundActuateParams>) {
@@ -52,7 +92,7 @@ module switchboard::aggregator_open_round_action {
 
         // gas saving fn to grab all relevant oracle config from oracle queue in one go
         let (
-            queue_authority,
+            _queue_authority,
             reward,
             open_round_reward, 
             _save_reward, 
@@ -70,9 +110,9 @@ module switchboard::aggregator_open_round_action {
         if (escrow::balance<CoinType>(params.aggregator_addr, queue_addr) < max_round_cost) return (errors::LeaseInsufficientCoin(), option::none<AggregatorOpenRoundActuateParams>());
         
         if (!unpermissioned_feeds_enabled) {
-            let pkey = permission::key(&queue_authority, &queue_addr, &params.aggregator_addr);
-            let p = switchboard::permission_get(pkey);
-            if (!permission::has(&p, permission::PERMIT_ORACLE_QUEUE_USAGE())) return (errors::PermissionDenied(), option::none<AggregatorOpenRoundActuateParams>());
+            if (!has_queue_usage_permission<CoinType>(params.aggregator_addr)) {
+                return (errors::PermissionDenied(), option::none<AggregatorOpenRoundActuateParams>())
+            };
         };
         let job_keys = aggregator::job_keys(params.aggregator_addr);
 
@@ -107,7 +147,7 @@ module switchboard::aggregator_open_round_action {
 
         // gas saving fn to grab all relevant oracle config from oracle queue in one go
         let (
-            queue_authority,
+            _queue_authority,
             reward,
             open_round_reward, 
             _save_reward, 
@@ -127,9 +167,7 @@ module switchboard::aggregator_open_round_action {
         );
         
         if (!unpermissioned_feeds_enabled) {
-            let pkey = permission::key(&queue_authority, &queue_addr, &params.aggregator_addr);
-            let p = switchboard::permission_get(pkey);
-            assert!(permission::has(&p, permission::PERMIT_ORACLE_QUEUE_USAGE()), errors::PermissionDenied());
+            assert!(has_queue_usage_permission<CoinType>(params.aggregator_addr), errors::PermissionDenied());
         };
         let job_keys = aggregator::job_keys(params.aggregator_addr);
 

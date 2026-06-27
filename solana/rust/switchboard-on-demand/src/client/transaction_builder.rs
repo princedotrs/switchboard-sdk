@@ -5,6 +5,10 @@ use crate::solana_program::instruction::{Instruction, AccountMeta};
 use crate::solana_compat::address_lookup_table::state::AddressLookupTable;
 use crate::solana_compat::solana_client::nonblocking::rpc_client::RpcClient;
 use crate::solana_compat::address_lookup_table::AddressLookupTableAccount;
+use crate::solana_compat::{
+    to_message_address_lookup_table_account,
+    MessageAddressLookupTableAccount,
+};
 use crate::solana_compat::hash::Hash;
 use crate::solana_compat::compute_budget::ComputeBudgetInstruction;
 use crate::solana_compat::solana_sdk::signer::Signer;
@@ -580,12 +584,11 @@ impl TransactionBuilder {
                 data: ix.data.clone(),
             }
         }).collect();
-        let converted_lookup_accounts: Vec<crate::solana_compat::MessageAddressLookupTableAccount> = address_lookup_accounts.iter().map(|lut| {
-            crate::solana_compat::MessageAddressLookupTableAccount {
-                key: lut.key.to_bytes().into(),
-                addresses: lut.addresses.iter().map(|addr| addr.to_bytes().into()).collect(),
-            }
-        }).collect();
+        let converted_lookup_accounts: Vec<MessageAddressLookupTableAccount> =
+            address_lookup_accounts
+                .iter()
+                .map(to_message_address_lookup_table_account)
+                .collect();
         let converted_blockhash: crate::solana_compat::solana_sdk::hash::Hash = crate::solana_compat::solana_sdk::hash::Hash::new_from_array(recent_blockhash.to_bytes());
 
         let v0_message = crate::solana_compat::solana_sdk::message::v0::Message::try_compile(

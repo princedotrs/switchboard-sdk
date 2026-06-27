@@ -184,8 +184,8 @@ export class Randomness {
         program: this.program,
         queueAddress: spl.getDefaultQueueAddress(isMainnet),
       });
-      const solanaOracleInstance =
-        await solanaQueue.fetchOracleByLatestVersion();
+      const { oracle: solanaOracleInstance } =
+        await solanaQueue.selectRandomnessOracle();
       [oracle] = web3.PublicKey.findProgramAddressSync(
         [
           Buffer.from('Oracle'),
@@ -195,7 +195,8 @@ export class Randomness {
         spl.ON_DEMAND_MAINNET_PID
       );
     } else {
-      const oracleInstance = await queueAccount.fetchOracleByLatestVersion();
+      const { oracle: oracleInstance } =
+        await queueAccount.selectRandomnessOracle();
       oracle = oracleInstance.pubkey;
     }
 

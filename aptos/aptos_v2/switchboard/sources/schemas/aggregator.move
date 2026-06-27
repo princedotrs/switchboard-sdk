@@ -1270,4 +1270,9 @@ module switchboard::aggregator {
         let latest_confirmed_round = borrow_global_mut<AggregatorRound<LatestConfirmedRound>>(signer::address_of(account));
         latest_confirmed_round.round_confirmed_timestamp = timestamp;
     }
+
+    #[test_only]
+    public fun test_crank_row_count(addr: address): u64 acquires AggregatorConfig {
+        borrow_global<AggregatorConfig>(addr).crank_row_count
+    }
 }

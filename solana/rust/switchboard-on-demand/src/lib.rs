@@ -106,7 +106,7 @@ pub const SDK_NAME: &str = "switchboard-on-demand";
 pub const SUPPORTED_PROGRAM_VERSIONS: &[&str] = &["0.7.0"];
 
 /// Minimum supported Solana version for compatibility
-pub const MIN_SOLANA_VERSION: &str = "1.18.0";
+pub const MIN_SOLANA_VERSION: &str = "2.1.0";
 
 /// Decimal number utilities for handling Switchboard oracle data
 pub mod decimal;

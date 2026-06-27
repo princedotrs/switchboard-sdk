@@ -26,12 +26,20 @@ compile_error!("The 'pinocchio' feature requires either 'solana-v2' or 'solana-v
 #[cfg(feature = "anchor")]
 pub use anchor_lang::solana_program;
 
-// When anchor is NOT enabled, use version-specific solana_program.
-// A no-default-features build falls back to v2 program types.
-#[cfg(all(not(feature = "anchor"), not(feature = "solana-v3")))]
+// When anchor is NOT enabled, use version-specific solana_program
+// v3 takes precedence when both v2 and v3 are enabled
+#[cfg(all(not(feature = "anchor"), feature = "solana-v2"))]
 pub use solana_program_v2 as solana_program;
 #[cfg(all(not(feature = "anchor"), feature = "solana-v3"))]
 pub use solana_program_v3 as solana_program;
+// Keep the intentionally invalid `pinocchio`-without-Solana-version build
+// type-resolvable so the compile_error above is the primary diagnostic.
+#[cfg(all(
+    not(feature = "anchor"),
+    feature = "pinocchio",
+    not(any(feature = "solana-v2", feature = "solana-v3"))
+))]
+pub use solana_program_v2 as solana_program;
 
 // ===== solana_sdk (only when client is enabled) =====
 // Version-specific solana_sdk selection based on features
@@ -156,19 +164,37 @@ extern "C" {
 #[cfg(feature = "anchor")]
 pub use solana_program_v2::address_lookup_table::AddressLookupTableAccount;
 
-// For v2 and no-default builds, it's in solana_program
-#[cfg(all(not(feature = "solana-v3"), not(feature = "anchor")))]
+// For v2, it's in solana_program
+#[cfg(all(
+    feature = "solana-v2",
+    not(feature = "solana-v3"),
+    not(feature = "anchor")
+))]
 pub use solana_program::address_lookup_table::AddressLookupTableAccount;
 
 // For v3 when used with client-v3, get it from our v2-compat re-exported address_lookup_table module
 #[cfg(all(feature = "solana-v3", feature = "client-v3"))]
 pub use address_lookup_table::AddressLookupTableAccount;
 
-#[cfg(feature = "client-v3")]
-pub type MessageAddressLookupTableAccount = solana_message_v3::AddressLookupTableAccount;
-
-#[cfg(not(feature = "client-v3"))]
+#[cfg(all(any(feature = "client", feature = "client-v2"), not(feature = "client-v3")))]
 pub type MessageAddressLookupTableAccount = AddressLookupTableAccount;
+
+#[cfg(feature = "client-v3")]
+pub type MessageAddressLookupTableAccount = solana_sdk::message::AddressLookupTableAccount;
+
+#[cfg(any(feature = "client", feature = "client-v2", feature = "client-v3"))]
+pub fn to_message_address_lookup_table_account(
+    lut: &address_lookup_table::AddressLookupTableAccount,
+) -> MessageAddressLookupTableAccount {
+    MessageAddressLookupTableAccount {
+        key: lut.key.to_bytes().into(),
+        addresses: lut
+            .addresses
+            .iter()
+            .map(|address| address.to_bytes().into())
+            .collect(),
+    }
+}
 
 /// Cluster type enum for specifying Solana network environments
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -222,7 +222,7 @@ pub struct SurgeUpdate {
     raw_response: RawGatewayResponse,
 }
 
-#[cfg(feature = "client")]
+#[cfg(any(feature = "client", feature = "client-v3"))]
 use crate::Instruction;
 
 // Ed25519 instruction format constants
@@ -235,7 +235,7 @@ const VERSION_SIZE: usize = 1;
 const ORACLE_INDEX_SIZE: usize = 1;
 const PADDING_SIZE: usize = 1;
 
-#[cfg(feature = "client")]
+#[cfg(any(feature = "client", feature = "client-v3"))]
 /// Build a custom Ed25519 signature verification instruction for Switchboard On-Demand.
 ///
 /// This creates an Ed25519 signature verification instruction that includes additional
@@ -684,7 +684,7 @@ impl SurgeUpdate {
     /// - Clock sysvar (read-only, for timestamp validation)
     /// - Payer (writable, signer, pays for account creation)
     /// - System program (read-only, for account creation)
-    #[cfg(feature = "client")]
+    #[cfg(any(feature = "client", feature = "client-v3"))]
     pub fn to_quote_ix(
         &self,
         queue_pubkey: crate::Pubkey,
@@ -837,7 +837,7 @@ impl SurgeUpdate {
                 AccountMeta::new_readonly(sysvar::slot_hashes::ID, false),  // slot_sysvar [3]
                 AccountMeta::new_readonly(sysvar::clock::ID, false),        // clock_sysvar [4]
                 AccountMeta::new(payer, true),                    // payer [5]
-                AccountMeta::new_readonly(crate::solana_compat::solana_program::system_program::ID, false), // system_program [6]
+                AccountMeta::new_readonly(crate::SYSTEM_PROGRAM_ID, false), // system_program [6]
             ],
             data: vec![0u8, instruction_idx as u8, bump], // [opcode, ix_idx, bump]
         };

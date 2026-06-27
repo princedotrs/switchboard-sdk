@@ -16,15 +16,9 @@ import type {
   FetchSignaturesConsensusResponse,
 } from '../oracle-interfaces/gateway.js';
 import * as spl from '../utils/index.js';
+import { isMainnetConnection } from '../utils/index.js';
 import { loadLookupTables } from '../utils/index.js';
 import { getLutKey, getLutSigner } from '../utils/lookupTable.js';
-import {
-  getCrossbarNetworkForCluster,
-  getDefaultQueueAddressForCluster,
-  getOfficialClusterForProgramId,
-  normalizeSupportedSolanaCluster,
-  requireSupportedSolanaCluster,
-} from '../utils/solanaCluster.js';
 
 import { Oracle } from './oracle.js';
 import { Queue } from './queue.js';
@@ -67,6 +61,12 @@ export interface OracleSubmission {
   value: BN;
 }
 
+/**
+ * Classic PullFeed account layout.
+ *
+ * New Solana/SVM feed-hash integrations should read canonical quote-program
+ * OracleQuote accounts instead of this legacy account layout.
+ */
 export interface PullFeedAccountData {
   submissions: OracleSubmission[];
   authority: web3.PublicKey;
@@ -74,7 +74,9 @@ export interface PullFeedAccountData {
   feedHash: Uint8Array;
   initializedAt: BN;
   permissions: BN;
+  /** Stored maximum variance scaled by 1e9. */
   maxVariance: BN;
+  /** Unscaled job/source quorum. */
   minResponses: number;
   name: Uint8Array;
   sampleSize: number;
@@ -109,9 +111,21 @@ export class OracleResponse {
   }
 }
 
+export function hasOracleFailure(error: string): boolean {
+  const normalized = error.trim();
+  return normalized !== '' && normalized !== '[]';
+}
+
+export function isSuccessfulOracleResponse(
+  value: Big | null,
+  error: string
+): boolean {
+  return value !== null && !hasOracleFailure(error);
+}
+
 function padStringWithNullBytes(
   input: string,
-  desiredLength = 32
+  desiredLength: number = 32
 ): string {
   const nullByte = '\0';
   while (input.length < desiredLength) {
@@ -138,6 +152,10 @@ function getIsSolana(chain?: string) {
   return chain === undefined || chain === 'solana';
 }
 
+function getIsMainnet(network?: string) {
+  return network === 'mainnet' || network === 'mainnet-beta';
+}
+
 /**
  *  Checks if the pull feed account needs to be initialized.
  *
@@ -161,11 +179,16 @@ async function checkNeedsInit(
 }
 
 /**
- * PullFeed account management for persistent price feeds
+ * Legacy PullFeed account management for persistent price feeds
  *
- * The PullFeed class manages on-chain feed accounts that store price
- * history and configuration. While the quote approach is more efficient
- * for most use cases, feeds are useful when you need:
+ * The PullFeed class manages classic on-chain feed accounts that store price
+ * history and configuration. This is a legacy compatibility path. New
+ * Solana/SVM feed-hash integrations should use {@linkcode Queue.fetchManagedUpdateIxs}
+ * and canonical OracleQuote accounts instead.
+ *
+ * PullFeed update helpers submit through the classic PullFeed program path
+ * and depend on queue/gateway support for the legacy secp256k1 signature
+ * scheme. They remain useful when you maintain:
  *
  * - Persistent price history on-chain
  * - Standardized addresses for multiple consumers
@@ -186,12 +209,13 @@ async function checkNeedsInit(
  * await pullFeed.initIx({
  *   name: "BTC/USD",
  *   queue: queuePubkey,
- *   maxVariance: 1.0,
+ *   maxVariance: 1.0, // 1%; this helper scales by 1e9 internally
  *   minResponses: 3,
  *   feedHash: jobHash,
  * });
  *
- * // Update the feed
+ * // Legacy PullFeed account update. For new feed-hash integrations, use
+ * // Queue.fetchManagedUpdateIxs(...) and read the canonical OracleQuote.
  * const [updateIx, responses] = await pullFeed.fetchUpdateIx();
  * ```
  *
@@ -202,7 +226,9 @@ export class PullFeed {
   pubkey: web3.PublicKey;
   configs: {
     queue: web3.PublicKey;
+    /** Human percent; init/set helpers scale by 1e9 internally. */
     maxVariance: number;
+    /** Unscaled job/source quorum. */
     minResponses: number;
     feedHash: Buffer;
     minSampleSize: number;
@@ -255,21 +281,6 @@ export class PullFeed {
     return this.network;
   }
 
-  private async resolveCrossbarNetwork(): Promise<CrossbarNetwork> {
-    if (this.network !== null) {
-      return this.network;
-    }
-
-    const cluster =
-      getOfficialClusterForProgramId(this.program.programId) ??
-      (await requireSupportedSolanaCluster(
-        this.program.provider.connection,
-        `PullFeed(${this.pubkey.toBase58()})`
-      ));
-    this.network = getCrossbarNetworkForCluster(cluster);
-    return this.network;
-  }
-
   static generate(program: Program): [PullFeed, web3.Keypair] {
     const keypair = web3.Keypair.generate();
     const feed = new PullFeed(program, keypair.publicKey);
@@ -302,8 +313,11 @@ export class PullFeed {
     params: {
       name: string;
       queue: web3.PublicKey;
+      /** Human percent; scaled by 1e9 internally. */
       maxVariance: number;
+      /** Unscaled job/source quorum. */
       minResponses: number;
+      /** Unscaled oracle/sample quorum. */
       minSampleSize: number;
       maxStaleness: number;
       permitWriteByAuthority?: boolean;
@@ -381,7 +395,19 @@ export class PullFeed {
     if (this.jobs) {
       return this.jobs!;
     }
-    crossbarClient.setNetwork(await this.resolveCrossbarNetwork());
+
+    // Detect and cache network if not already set
+    if (this.network === null) {
+      const isMainnet = await isMainnetConnection(
+        this.program.provider.connection
+      );
+      this.network = isMainnet
+        ? CrossbarNetwork.SolanaMainnet
+        : CrossbarNetwork.SolanaDevnet;
+    }
+
+    // Set the crossbar network based on detected/cached network
+    crossbarClient.setNetwork(this.network);
 
     const configs = await this.loadConfigs();
     const feedHash = Buffer.from(configs.feedHash);
@@ -398,9 +424,9 @@ export class PullFeed {
    * @param {Program} program - The Anchor program instance.
    * @param {PublicKey} queue - The queue account public key.
    * @param {Array<IOracleJob>} jobs - The oracle jobs to execute.
-   * @param {number} maxVariance - The maximum variance allowed for the feed.
-   * @param {number} minResponses - The minimum number of job responses required.
-   * @param {number} minSampleSize - The minimum number of samples required for setting feed value.
+   * @param {number} maxVariance - The maximum variance allowed for the feed as a human percent; scaled by 1e9 internally.
+   * @param {number} minResponses - The minimum number of job responses required, unscaled.
+   * @param {number} minSampleSize - The minimum number of samples required for setting feed value, unscaled.
    * @param {number} maxStaleness - The maximum number of slots that can pass before a feed value is considered stale.
    * @returns {Promise<web3.TransactionInstruction>} A promise that resolves to the transaction instruction.
    */
@@ -500,9 +526,9 @@ export class PullFeed {
    * @param params
    * @param params.feedHash - The hash of the feed as a `Uint8Array` or hexadecimal `string`. Only results signed with this hash will be accepted.
    * @param params.authority - The authority of the feed.
-   * @param params.maxVariance - The maximum variance allowed for the feed.
-   * @param params.minResponses - The minimum number of responses required.
-   * @param params.minSampleSize - The minimum number of samples required for setting feed value.
+   * @param params.maxVariance - The maximum variance allowed for the feed as a human percent; scaled by 1e9 internally.
+   * @param params.minResponses - The minimum number of responses required, unscaled.
+   * @param params.minSampleSize - The minimum number of samples required for setting feed value, unscaled.
    * @param params.maxStaleness - The maximum number of slots that can pass before a feed value is considered stale.
    * @returns A promise that resolves to the transaction instruction to set feed configs.
    */
@@ -575,11 +601,14 @@ export class PullFeed {
    * - An array containing usable lookup tables.
    */
   /**
-   * Fetches update instructions for this feed
+   * Fetches update instructions for this legacy PullFeed account.
    *
-   * Retrieves fresh oracle data and creates the instructions to update
-   * the on-chain feed account. This method handles all the complexity
-   * of oracle communication and signature verification.
+   * This compatibility method targets classic PullFeed accounts and the
+   * `pullFeedSubmitResponseConsensus` path. It uses the backward-compatible
+   * secp256k1 signature flow by default and requires a queue/gateway
+   * environment that still serves that path. New Solana/SVM feed-hash
+   * integrations should use {@linkcode Queue.fetchManagedUpdateIxs} and
+   * canonical OracleQuote accounts instead.
    *
    * @param {Object} params - Update parameters
    * @param {number} params.numSignatures - Number of oracle signatures (defaults to minSampleSize + 33%)
@@ -649,7 +678,9 @@ export class PullFeed {
    */
   async loadConfigs(force?: boolean): Promise<{
     queue: web3.PublicKey;
+    /** Human percent, converted from the stored 1e9-scaled value. */
     maxVariance: number;
+    /** Unscaled job/source quorum. */
     minResponses: number;
     feedHash: Buffer;
     minSampleSize: number;
@@ -672,14 +703,21 @@ export class PullFeed {
   }
 
   /**
-   * Fetches updates for a feed, returning instructions that must be executed in order at the front
-   * of the transaction.
+   * Fetches updates for a legacy PullFeed account, returning instructions that
+   * must be executed in order at the front of the transaction.
+   *
+   * This compatibility method targets classic PullFeed accounts and the
+   * `pullFeedSubmitResponseConsensus` path. It uses the backward-compatible
+   * secp256k1 signature flow by default and requires a queue/gateway
+   * environment that still serves that path. New Solana/SVM feed-hash
+   * integrations should use {@linkcode Queue.fetchManagedUpdateIxs} and
+   * canonical OracleQuote accounts instead.
    *
    * @param program - The Anchor program instance
    * @param params - The parameters object
    * @param params.feed - PullFeed address to fetch updates for
    * @param params.chain - Optional chain identifier (defaults to "solana")
-   * @param params.network - Optional network identifier ("mainnet", "mainnet-beta", or "devnet")
+   * @param params.network - Optional network identifier ("mainnet", "mainnet-beta", "testnet", "devnet")
    * @param params.numSignatures - Number of signatures to fetch
    * @param params.crossbarClient - Optional CrossbarClient instance to use
    * @param recentSlothashes - Optional array of recent slothashes as [BN, string] tuples
@@ -687,7 +725,7 @@ export class PullFeed {
    * @param payer - Optional transaction payer public key
    * @returns Promise resolving to:
    * - instructions: Array of instructions that must be executed in order:
-   *   [0] = Ed25519 program verification instruction
+   *   [0] = secp256k1 program verification instruction
    *   [1] = feed update instruction
    * - oracleResponses: Array of responses from oracles
    * - numSuccesses: Number of successful responses
@@ -744,7 +782,9 @@ export class PullFeed {
     });
 
     // Find the number of successful responses.
-    const numSuccesses = oracleResponses.filter(({ value }) => value).length;
+    const numSuccesses = oracleResponses.filter(({ value, error }) =>
+      isSuccessfulOracleResponse(value, error)
+    ).length;
 
     return [
       /* instructions= */ numSuccesses ? ixns : undefined,
@@ -756,9 +796,13 @@ export class PullFeed {
   }
 
   /**
-   * Fetches updates for multiple feeds at once into a SINGLE tightly packed instruction.
-   * Returns instructions that must be executed in order, with the Ed25519 verification
-   * instruction placed at the front of the transaction.
+   * Fetches updates for multiple legacy PullFeed accounts at once into a
+   * SINGLE tightly packed instruction.
+   *
+   * This compatibility method targets classic PullFeed accounts and uses the
+   * backward-compatible secp256k1 signature flow by default. New Solana/SVM
+   * feed-hash integrations should use {@linkcode Queue.fetchManagedUpdateIxs}
+   * and canonical OracleQuote accounts instead.
    *
    * @param program - The Anchor program instance.
    * @param params_ - The parameters object.
@@ -771,7 +815,7 @@ export class PullFeed {
    * @param debug - A boolean flag to enable or disable debug mode. Defaults to `false`.
    * @returns A promise that resolves to a tuple containing:
    * - An array of transaction instructions that must be executed in order:
-   *   [0] = Ed25519 program verification instruction
+   *   [0] = secp256k1 program verification instruction
    *   [1] = feed update instruction
    * - An array of `AddressLookupTableAccount` to use.
    * - The raw response data.
@@ -962,19 +1006,27 @@ export class PullFeed {
     return [[secpInstruction, submitResponseIx], luts, response];
   }
 
+  /**
+   * Fetches lightweight update instructions for legacy PullFeed accounts.
+   *
+   * This compatibility method targets classic PullFeed accounts and uses the
+   * backward-compatible secp256k1 signature flow by default. New Solana/SVM
+   * feed-hash integrations should use {@linkcode Queue.fetchManagedUpdateIxs}
+   * and canonical OracleQuote accounts instead.
+   */
   static async fetchUpdateManyLightIx(
     program: Program,
     params: {
       feeds: PullFeed[];
       chain?: string;
-      network?: 'mainnet' | 'mainnet-beta' | 'devnet';
+      network?: 'mainnet' | 'mainnet-beta' | 'testnet' | 'devnet';
       recentSlothashes?: Array<[BN, string]>;
       numSignatures: number;
       crossbarClient?: CrossbarClient;
       payer?: web3.PublicKey;
       variableOverrides?: Record<string, string>;
     },
-    debug = false
+    debug: boolean = false
   ): Promise<
     [
       web3.TransactionInstruction[],
@@ -983,18 +1035,7 @@ export class PullFeed {
     ]
   > {
     const isSolana = getIsSolana(params.chain);
-    const cluster =
-      isSolana || !params.network
-        ? null
-        : normalizeSupportedSolanaCluster(
-            params.network,
-            'PullFeed.fetchUpdateManyLightIx'
-          );
-    if (!isSolana && !cluster) {
-      throw new Error(
-        'PullFeed.fetchUpdateManyLightIx requires network to be "mainnet" or "devnet" when chain is not "solana".'
-      );
-    }
+    const isMainnet = getIsMainnet(params.network);
 
     const crossbarClient = params.crossbarClient ?? CrossbarClient.default();
 
@@ -1028,7 +1069,7 @@ export class PullFeed {
     // load the default queue for the specified network.
     const solanaQueue = isSolana
       ? queue
-      : getDefaultQueueAddressForCluster(cluster!);
+      : spl.getDefaultQueueAddress(isMainnet);
     if (debug) console.log(`Using queue ${solanaQueue.toBase58()}`);
 
     const response = await Queue.fetchSignaturesConsensus(

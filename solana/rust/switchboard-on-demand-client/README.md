@@ -10,7 +10,7 @@ A middleman service to fetch oracle jobs from IPFS and to return feed price simu
 Before publishing this crate to crates.io, commit the release changes to `main` or create a release tag that points at the release commit, then run:
 
 ```bash
-solana/rust/switchboard-on-demand-client/scripts/verify-crate-release.sh
+rust/switchboard-on-demand-client/scripts/verify-crate-release.sh
 ```
 
 The script refuses to package from a dirty tree, refuses non-`main` branches unless the commit is tagged, and verifies the generated crate's `.cargo_vcs_info.json` has `dirty = false` and points at the release commit. Do not publish if this check fails.
@@ -18,7 +18,26 @@ The script refuses to package from a dirty tree, refuses non-`main` branches unl
 ## Gateways
 The frontend to interact with Switchboard oracles.
 
-## Example
+Gateway helper parameters named `max_variance` accept human percentages and scale by `1e9` before sending gateway requests. Raw v2 `OracleFeed.max_job_range_pct` values are already scaled integers, so `1_000_000_000` means `1%`. `min_job_responses` and `min_oracle_samples` are unscaled counts. See [Feed Parameter Units](https://docs.switchboard.xyz/custom-feeds/advanced-feed-configuration/feed-parameter-units).
+
+## Solana/SVM quote-program path
+
+New Solana/SVM feed-hash integrations should update canonical quote-program
+accounts with the managed Ed25519 update path, then read the stored
+`SwitchboardQuote` account. Stored quote accounts are variable-length; parse
+them with the SDK account types instead of hard-coding byte offsets.
+
+For on-chain reads, use the `switchboard-on-demand` crate's
+`SwitchboardQuote`, `PackedFeedInfo`, and `QuoteVerifier` types. Each
+`PackedFeedInfo` exposes the feed ID, raw `feed_value`, decimal `value()`, and
+`min_oracle_samples`.
+
+## Legacy PullFeed account example
+
+The examples below are for classic PullFeed accounts only. They submit through
+the legacy PullFeed program path and require queue/gateway support for the
+classic secp256k1 update flow. Do not use these examples for new feed-hash
+custom-feed integrations.
 
 ```rust
 #[tokio::main]
@@ -73,7 +92,12 @@ async fn main() {
 }
 ```
 
-## Updating many feeds at once
+## Updating many legacy PullFeed accounts at once
+
+This path is also legacy PullFeed compatibility only. New Solana/SVM
+integrations should use managed quote-program updates and canonical
+`SwitchboardQuote` accounts.
+
 ```rust
 async fn main() {
     let ctx = SbContext::new();

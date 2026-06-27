@@ -1,6 +1,6 @@
 {
   "name": "@switchboard-xyz/common",
-  "version": "5.8.1",
+  "version": "5.8.2",
   "description": "common type definitions and utils for interacting with switchboard",
   "license": "MIT",
   "type": "module",
@@ -139,7 +139,8 @@
     "buffer": "^6.0.3",
     "decimal.js": "^10.4.3",
     "js-sha256": "^0.11.0",
-    "protobufjs": "^7.4.0"
+    "protobufjs": "^7.4.0",
+    "yaml": "^2.8.1"
   },
   "devDependencies": {
     "@types/big.js": "^6.1.6",
