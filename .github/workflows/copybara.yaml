@@ -10,6 +10,11 @@ jobs:
     name: Sync switchboard-sdk repo with sbv3 main branch
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/create-github-app-token@v3
+        id: app-token
+        with:
+          client-id: ${{ vars.SB_COPYBARA_GH_APP_CLIENT_ID }}
+          private-key: ${{ secrets.SB_COPYBARA_GH_APP_PRIVATE_KEY }}
       - name: Checkout
         uses: actions/checkout@v3
         with:
@@ -20,7 +25,7 @@ jobs:
         # put the ssh_key and access_token in files
         run: |
             echo "${{ secrets.COPYBARA_SSH_KEY }}" > $HOME/copybara_ssh_key
-            echo "https://user:${{ secrets.COPYBARA_PAT }}@github.com" > $HOME/copybara_pat
+            echo "https://user:${{ steps.app-token.outputs.token }}@github.com" > $HOME/copybara_pat
 
       - name: Run Copybara
         # run copybara and pass in the credentials files
