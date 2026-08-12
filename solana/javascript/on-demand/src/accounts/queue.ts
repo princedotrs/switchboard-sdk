@@ -6,7 +6,10 @@ import {
   SPL_SYSVAR_SLOT_HASHES_ID,
   SPL_TOKEN_PROGRAM_ID,
 } from '../constants.js';
-import { Ed25519InstructionUtils } from '../instruction-utils/ed25519-instruction-utils.js';
+import {
+  ED25519_CURRENT_INSTRUCTION_INDEX,
+  Ed25519InstructionUtils,
+} from '../instruction-utils/ed25519-instruction-utils.js';
 import type { FetchSignaturesConsensusResponse } from '../oracle-interfaces/gateway.js';
 import type { FeedRequest } from '../oracle-interfaces/gateway.js';
 import { Gateway } from '../oracle-interfaces/gateway.js';
@@ -1119,8 +1122,8 @@ export class Queue {
    *
    * @param {CrossbarClient} crossbar - Crossbar client for data routing and gateway discovery
    * @param {string[] | IOracleFeed[]} feedHashesOrFeeds - Array of feed hashes (hex strings) or array of OracleFeed objects (max 16 feeds)
-   * @param {number} numSignatures - Number of oracle signatures required (default: 1, max 255)
-   * @param {number} instructionIdx - Instruction index for Ed25519 program (default: 0)
+   * @param {number} numSignatures - Number of oracle signatures required (default: 1, max 8)
+   * @param {number} instructionIdx - Legacy absolute Ed25519 instruction index. Omit to use Solana's position-independent current-instruction reference.
    * @returns {Promise<web3.TransactionInstruction>}
    *          Ed25519 signature verification instruction ready for transaction
    *
@@ -1142,8 +1145,7 @@ export class Queue {
    *   [btcFeedHash],
    *   {
    *     numSignatures: 1, // Single oracle signature
-   *     variableOverrides: {},
-   *     instructionIdx: 0
+   *     variableOverrides: {}
    *   }
    * );
    *
@@ -1166,8 +1168,7 @@ export class Queue {
    *   [btcFeed, ethFeed],
    *   {
    *     numSignatures: 3,
-   *     variableOverrides: {},
-   *     instructionIdx: 0
+   *     variableOverrides: {}
    *   }
    * );
    *
@@ -1183,8 +1184,7 @@ export class Queue {
    *   feedHashes,
    *   {
    *     numSignatures: 5, // Require 5 oracle signatures for high-value operations
-   *     variableOverrides: {},
-   *     instructionIdx: 1  // Instruction index for multiple Ed25519 instructions
+   *     variableOverrides: {}
    *   }
    * );
    *
@@ -1214,13 +1214,17 @@ export class Queue {
     configs?: {
       variableOverrides?: Record<string, string>;
       numSignatures?: number;
+      /**
+       * @deprecated Omit this field to use Solana's position-independent
+       * current-instruction reference.
+       */
       instructionIdx?: number;
     }
   ): Promise<web3.TransactionInstruction> {
-    const config = configs ?? {
+    const config = {
       variableOverrides: {},
       numSignatures: 1,
-      instructionIdx: 0,
+      ...configs,
     };
 
     // Detect and cache network if not already set
@@ -1381,7 +1385,7 @@ export class Queue {
     }
     const ed25519Instruction = Ed25519InstructionUtils.buildEd25519Instruction(
       ed25519Signatures,
-      config.instructionIdx ?? 0,
+      config.instructionIdx ?? ED25519_CURRENT_INSTRUCTION_INDEX,
       slot,
       0 // version 0 for Ed25519 v0 scheme
     );
@@ -1414,15 +1418,13 @@ export class Queue {
    * - **Gateway Caching**: Automatically fetches and caches gateway for subsequent calls
    * - **Feed Format Flexibility**: Accepts either feed hashes (strings) or OracleFeed objects
    *
-   * @param {Gateway} gateway - Gateway instance for oracle communication
    * @param {CrossbarClient} crossbar - Crossbar client for data routing
    * @param {string[] | IOracleFeed[]} feedHashesOrFeeds - Array of feed hashes (hex strings) or array of OracleFeed objects (max 16 feeds)
    * @param {object} configs - Configuration object with optional parameters
    * @param {Record<string, string>} [configs.variableOverrides] - Variable overrides for feed processing
    * @param {number} [configs.numSignatures] - Number of oracle signatures required (default: 1)
-   * @param {number} [configs.instructionIdx] - Instruction index for Ed25519 program (default: 0)
+   * @param {number} [configs.instructionIdx] - Legacy absolute instruction index. Omit when using `asV0Tx`, or finalize custom transaction arrays with `finalizeManagedUpdateInstructions`.
    * @param {web3.PublicKey} [configs.payer] - Payer for oracle account creation (default: program provider payer)
-   * @param {web3.PublicKey} [configs.programId] - Optional program ID for oracle account derived owner (default: QUOTE_PROGRAM_ID)
    * @returns {Promise<web3.TransactionInstruction[]>}
    *          Array of instructions: [Ed25519 verification, quote program verified_update]
    *
@@ -1443,9 +1445,7 @@ export class Queue {
    *   {
    *     numSignatures: 3, // Require 3 oracle signatures for consensus
    *     variableOverrides: {},
-   *     instructionIdx: 0,
-   *     payer: myWallet.publicKey,
-   *     programId: customQuoteProgramId // Optional: use custom program ID for oracle derivation
+   *     payer: myWallet.publicKey
    *   }
    * );
    *
@@ -1469,7 +1469,6 @@ export class Queue {
    *   {
    *     numSignatures: 3,
    *     variableOverrides: {},
-   *     instructionIdx: 0,
    *     payer: myWallet.publicKey
    *   }
    * );
@@ -1484,6 +1483,14 @@ export class Queue {
    * });
    *
    * await connection.sendTransaction(tx);
+   *
+   * // If you compile transactions without asV0Tx, finalize the complete,
+   * // ordered instruction array immediately before compilation:
+   * const finalIxs = finalizeManagedUpdateInstructions([
+   *   ...prefixIxs,
+   *   ...instructions,
+   *   yourBusinessLogicIx,
+   * ]);
    * ```
    */
   async fetchManagedUpdateIxs(
@@ -1492,14 +1499,19 @@ export class Queue {
     configs?: {
       variableOverrides?: Record<string, string>;
       numSignatures?: number;
+      /**
+       * @deprecated `asV0Tx` resolves this automatically. For custom
+       * transaction builders, call `finalizeManagedUpdateInstructions` after
+       * arranging the complete instruction array.
+       */
       instructionIdx?: number;
       payer?: web3.PublicKey;
     }
   ): Promise<web3.TransactionInstruction[]> {
-    const config = configs ?? {
+    const config = {
       variableOverrides: {},
       numSignatures: 1,
-      instructionIdx: 0,
+      ...configs,
     };
 
     // Detect and cache network if not already set

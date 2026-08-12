@@ -175,7 +175,11 @@ impl PullFeedAccountData {
             .await
             .context("PullFeed.fetchUpdateIx: Failed to fetch jobs")?;
 
-        let jobs: Vec<OracleJob> = serde_json::from_value(jobs_data.get("jobs").unwrap().clone())
+        let jobs = jobs_data
+            .get("jobs")
+            .cloned()
+            .ok_or_else(|| anyhow_ext::anyhow!("PullFeed: Crossbar response is missing jobs"))?;
+        let jobs: Vec<OracleJob> = serde_json::from_value(jobs)
             .context("PullFeed.fetchUpdateIx: Failed to deserialize jobs")?;
 
         Ok(jobs)

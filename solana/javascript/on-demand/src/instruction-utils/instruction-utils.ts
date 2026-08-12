@@ -1,3 +1,5 @@
+import { finalizeManagedUpdateInstructions } from './managed-update-instruction-utils.js';
+
 import { web3 } from '@coral-xyz/anchor-31';
 
 /**
@@ -81,10 +83,11 @@ export class InstructionUtils {
       });
     const recentBlockhash = (await params.connection.getLatestBlockhash())
       .blockhash;
+    const finalizedIxs = finalizeManagedUpdateInstructions(params.ixs);
 
     const simulateMessageV0 = new web3.TransactionMessage({
       recentBlockhash,
-      instructions: [...params.ixs, priorityFeeIx, simulationComputeLimitIx],
+      instructions: [...finalizedIxs, priorityFeeIx, simulationComputeLimitIx],
       payerKey: payer,
     }).compileToV0Message(params.lookupTables ?? []);
     const simulateTx = new web3.VersionedTransaction(simulateMessageV0);
@@ -111,7 +114,7 @@ export class InstructionUtils {
     });
     const messageV0 = new web3.TransactionMessage({
       recentBlockhash,
-      instructions: [...params.ixs, priorityFeeIx, computeLimitIx],
+      instructions: [...finalizedIxs, priorityFeeIx, computeLimitIx],
       payerKey: payer,
     }).compileToV0Message(params.lookupTables ?? []);
     const tx = new web3.VersionedTransaction(messageV0);

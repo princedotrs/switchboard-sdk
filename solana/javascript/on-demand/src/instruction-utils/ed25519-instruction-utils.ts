@@ -12,8 +12,18 @@ const ED25519_SIGNATURE_OFFSETS_SERIALIZED_SIZE = 14;
 const OFFSET_FIELD_SIZE = 2; // Each offset field is 2 bytes (LE)
 const SLOT_SIZE = 8; // Recent slot is 8 bytes (u64 LE)
 const VERSION_SIZE = 1; // Version is 1 byte (u8)
+const DISCRIMINATOR_SIZE = 4; // "SBOD" discriminator
 const ORACLE_INDEX_SIZE = 1; // Each oracle index is 1 byte
 const PADDING_SIZE = 1; // Single padding byte in instruction format
+const MAX_ED25519_SIGNATURES = 8;
+const MAX_U8 = 0xff;
+const MAX_U16 = 0xffff;
+
+/**
+ * Solana Ed25519 precompile sentinel for reading data from the current
+ * Ed25519 instruction rather than an absolute transaction instruction index.
+ */
+export const ED25519_CURRENT_INSTRUCTION_INDEX = MAX_U16;
 
 export type Ed25519Signature = {
   pubkey: Buffer; // 32-byte ED25519 public key
@@ -34,7 +44,7 @@ export class Ed25519InstructionUtils {
    */
   static buildEd25519Instruction(
     signatures: Ed25519Signature[],
-    instructionIndex: number,
+    instructionIndex: number = ED25519_CURRENT_INSTRUCTION_INDEX,
     recentSlot?: number,
     version?: number
   ): web3.TransactionInstruction {
@@ -43,24 +53,90 @@ export class Ed25519InstructionUtils {
       throw new Error('Invalid `signatures` parameter: must be an array');
     }
 
-    // Ensure that the `instructionIndex` is both a valid finite number and non-negative
-    if (!Number.isFinite(instructionIndex) || instructionIndex < 0) {
+    if (
+      !Number.isInteger(instructionIndex) ||
+      instructionIndex < 0 ||
+      instructionIndex > MAX_U16
+    ) {
       throw new Error('Invalid instruction index');
     } else if (!NonEmptyArrayUtils.safeValidate(signatures)) {
-      // Ensure that the `signatures` array is non-empty and that all signatures share the same
-      // common message
       throw new Error(
         'Invalid `signatures` array: cannot be empty. All oracles failed to provide valid signatures.'
       );
     }
 
-    // Validate that all signatures have oracleIdx - required for queue order matching
+    const hasRecentSlot = recentSlot !== undefined;
+    const hasVersion = version !== undefined;
+    if (hasRecentSlot !== hasVersion) {
+      throw new Error(
+        'Invalid Ed25519 quote metadata: recent slot and version must be provided together.'
+      );
+    }
+    if (
+      recentSlot !== undefined &&
+      (!Number.isSafeInteger(recentSlot) || recentSlot < 0)
+    ) {
+      throw new Error(
+        'Invalid Ed25519 quote recent slot: expected a non-negative safe integer.'
+      );
+    }
+    if (
+      version !== undefined &&
+      (!Number.isInteger(version) || version < 0 || version > MAX_U8)
+    ) {
+      throw new Error(
+        `Invalid Ed25519 quote version: expected an integer between 0 and ${MAX_U8}.`
+      );
+    }
+
+    if (signatures.length > MAX_ED25519_SIGNATURES) {
+      throw new Error(
+        `Too many Ed25519 signatures: received ${signatures.length}, maximum supported is ${MAX_ED25519_SIGNATURES}.`
+      );
+    }
+
+    const seenOracleIndexes = new Set<number>();
     for (let i = 0; i < signatures.length; i++) {
-      if (typeof signatures[i].oracleIdx !== 'number') {
+      const sig = signatures[i];
+      if (
+        !Buffer.isBuffer(sig.pubkey) ||
+        sig.pubkey.length !== ED25519_PUBKEY_SERIALIZED_SIZE
+      ) {
         throw new Error(
-          `Signature at index ${i} missing oracleIdx field - required for queue ordering`
+          `Signature at index ${i} has invalid Ed25519 pubkey length: expected ${ED25519_PUBKEY_SERIALIZED_SIZE} bytes.`
         );
       }
+      if (
+        !Buffer.isBuffer(sig.signature) ||
+        sig.signature.length !== ED25519_SIGNATURE_SERIALIZED_SIZE
+      ) {
+        throw new Error(
+          `Signature at index ${i} has invalid Ed25519 signature length: expected ${ED25519_SIGNATURE_SERIALIZED_SIZE} bytes.`
+        );
+      }
+      if (!Buffer.isBuffer(sig.message)) {
+        throw new Error(`Signature at index ${i} has invalid message buffer.`);
+      }
+      if (sig.message.length > MAX_U16) {
+        throw new Error(
+          `Signature at index ${i} has invalid message length: maximum supported is ${MAX_U16} bytes.`
+        );
+      }
+      if (
+        !Number.isInteger(sig.oracleIdx) ||
+        sig.oracleIdx < 0 ||
+        sig.oracleIdx > MAX_U8
+      ) {
+        throw new Error(
+          `Signature at index ${i} has invalid oracleIdx: expected an integer between 0 and ${MAX_U8}.`
+        );
+      }
+      if (seenOracleIndexes.has(sig.oracleIdx)) {
+        throw new Error(
+          `Duplicate oracleIdx ${sig.oracleIdx} in Ed25519 signatures.`
+        );
+      }
+      seenOracleIndexes.add(sig.oracleIdx);
     }
 
     // Sort signatures by oracleIdx to match queue order - CRITICAL for verification
@@ -69,43 +145,32 @@ export class Ed25519InstructionUtils {
       (a, b) => a.oracleIdx - b.oracleIdx
     );
 
-    // For ED25519, messages can be different lengths, but we still want to validate
-    // that all signatures are signing the same logical message content
-    // const diffIdx = sortedSignatures.findIndex(
-    // sig => !sig.message.equals(sortedSignatures[0].message)
-    // );
-    // if (diffIdx !== -1) {
-    // const expectedMessage = sortedSignatures[0].message.toString('base64');
-    // const differentMessage =
-    // sortedSignatures[diffIdx].message.toString('base64');
-    // throw new Error(`
-    // All signatures must share the same message. The signed message at #${diffIdx}
-    // (${differentMessage}) does not match the expected message (${expectedMessage})
-    // `);
-    // }
+    const diffIdx = sortedSignatures.findIndex(
+      sig => !sig.message.equals(sortedSignatures[0].message)
+    );
+    if (diffIdx !== -1) {
+      throw new Error(
+        'All signatures must share the same message. ' +
+          `Signature at index ${diffIdx} differs from the first signature.`
+      );
+    }
 
-    // We've validated that all signatures share the same message
     const commonMessage = sortedSignatures[0].message;
     const commonMessageSize = commonMessage.length;
 
-    // Solana Ed25519 instruction format constants (from working test_correct_format.js)
-    const SIGNATURE_OFFSETS_START = OFFSET_FIELD_SIZE; // Includes padding byte!
-    const DATA_START =
-      ED25519_SIGNATURE_OFFSETS_SERIALIZED_SIZE + SIGNATURE_OFFSETS_START; // 14 + 2 = 16
-
     const numSignatures = sortedSignatures.length;
-
-    // Correct Solana offsets calculation (from working test_correct_format.js)
-    const signatureOffset = DATA_START; // 16
-    const pubkeyOffset = signatureOffset + ED25519_SIGNATURE_SERIALIZED_SIZE; // 16 + 64 = 80
-    const messageOffset = pubkeyOffset + ED25519_PUBKEY_SERIALIZED_SIZE; // 80 + 32 = 112
+    const offsetsStart = ORACLE_INDEX_SIZE + PADDING_SIZE;
+    const dataStart =
+      offsetsStart + numSignatures * ED25519_SIGNATURE_OFFSETS_SERIALIZED_SIZE;
+    const signatureOffset = dataStart;
+    const pubkeyOffset =
+      signatureOffset + numSignatures * ED25519_SIGNATURE_SERIALIZED_SIZE;
+    const messageOffset =
+      pubkeyOffset + numSignatures * ED25519_PUBKEY_SERIALIZED_SIZE;
 
     const signatureOffsets: Uint8Array[] = [];
-    const signatureBuffer: number[] = [];
 
     for (let i = 0; i < sortedSignatures.length; i++) {
-      const sig = sortedSignatures[i];
-
       // Create a new Uint8Array to store the signature offsets
       const offsetsBytes = new Uint8Array(
         ED25519_SIGNATURE_OFFSETS_SERIALIZED_SIZE
@@ -147,28 +212,22 @@ export class Ed25519InstructionUtils {
 
       // Append the signature offsets to the list of signature offsets
       signatureOffsets.push(offsetsBytes);
-
-      // Append the signature and pubkey to the buffer
-      signatureBuffer.push(...Array.from(sig.signature));
-      signatureBuffer.push(...Array.from(sig.pubkey));
     }
 
-    // Build final instruction data with correct Solana format
-    // Add space for appended slot (8 bytes) and version (1 byte) if provided
-    const appendedSize =
+    const metadataSize =
       recentSlot !== undefined && version !== undefined
-        ? SLOT_SIZE + VERSION_SIZE
+        ? SLOT_SIZE + VERSION_SIZE + DISCRIMINATOR_SIZE
         : 0;
     const totalSize =
-      messageOffset + commonMessage.length + numSignatures + appendedSize;
-    const instrData = new Uint8Array(totalSize + 4);
+      messageOffset + commonMessage.length + numSignatures + metadataSize;
+    const instrData = new Uint8Array(totalSize);
     let position = 0;
 
     // 1. Write count byte
     instrData[position] = numSignatures;
     position += ORACLE_INDEX_SIZE;
 
-    // 2. Write padding byte (SIGNATURE_OFFSETS_START - 1 = 1 byte)
+    // 2. Write padding byte
     instrData[position] = 0;
     position += PADDING_SIZE;
 

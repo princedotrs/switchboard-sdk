@@ -20,11 +20,17 @@ import type {
 import type { CrossbarInstructionWire } from './utils/instructions.js';
 import { IxFromHex } from './utils/instructions.js';
 import { Gateway } from './gateway.js';
+import {
+  GatewayRequestError,
+  summarizeGatewayRequestError,
+} from './gateway-request-error.js';
 import type { IOracleFeed } from './protos.js';
 import { OracleFeed } from './protos.js';
 
 import type { TransactionInstruction } from '@solana/web3.js';
 import axios from 'axios';
+
+const TIMEOUT = 10_000;
 
 /**
  * Network options for CrossbarClient operations
@@ -575,7 +581,9 @@ export class CrossbarClient {
   async fetchGateways(network: string = 'mainnet'): Promise<string[]> {
     try {
       const gateways = await axios
-        .get(`${this.crossbarUrl}/gateways?network=${network}`)
+        .get(`${this.crossbarUrl}/gateways?network=${network}`, {
+          timeout: TIMEOUT,
+        })
         .then(resp => resp.data);
 
       return gateways;
@@ -703,15 +711,19 @@ export class CrossbarClient {
         )
         .then(resp => resp.data);
     } catch (err) {
-      if (!axios.isAxiosError(err)) throw err;
-
-      const response = err.response;
-      if (!response) throw err;
-
-      if (this.verbose) console.error(`${response.status}: ${response.data}`);
-      throw new Error(
-        `Bad Crossbar fetchSignaturesConsensus response: ${response.status}`
+      const error = GatewayRequestError.sanitizeAxios(
+        'CrossbarClient.fetchSignaturesConsensus',
+        err
       );
+      if (this.verbose) {
+        console.error(
+          'CrossbarClient.fetchSignaturesConsensus error',
+          error instanceof GatewayRequestError
+            ? error.toJSON()
+            : summarizeGatewayRequestError(error)
+        );
+      }
+      throw error;
     }
   }
 
@@ -755,13 +767,19 @@ export class CrossbarClient {
         })
         .then(resp => resp.data);
     } catch (err) {
-      if (!axios.isAxiosError(err)) throw err;
-
-      const response = err.response;
-      if (!response) throw err;
-
-      if (this.verbose) console.error(`${response.status}: ${response.data}`);
-      throw new Error(`Bad Crossbar simulateJobs response: ${response.status}`);
+      const error = GatewayRequestError.sanitizeAxios(
+        'CrossbarClient.simulateJobs',
+        err
+      );
+      if (this.verbose) {
+        console.error(
+          'CrossbarClient.simulateJobs error',
+          error instanceof GatewayRequestError
+            ? error.toJSON()
+            : summarizeGatewayRequestError(error)
+        );
+      }
+      throw error;
     }
   }
 
@@ -919,13 +937,19 @@ export class CrossbarClient {
         )
         .then(resp => resp.data);
     } catch (err) {
-      if (!axios.isAxiosError(err)) throw err;
-
-      const response = err.response;
-      if (!response) throw err;
-
-      if (this.verbose) console.error(`${response.status}: ${response.data}`);
-      throw new Error(`Bad Crossbar simulateFeed response: ${response.status}`);
+      const error = GatewayRequestError.sanitizeAxios(
+        'CrossbarClient.simulateFeed',
+        err
+      );
+      if (this.verbose) {
+        console.error(
+          'CrossbarClient.simulateFeed error',
+          error instanceof GatewayRequestError
+            ? error.toJSON()
+            : summarizeGatewayRequestError(error)
+        );
+      }
+      throw error;
     }
   }
 
@@ -933,17 +957,23 @@ export class CrossbarClient {
    * Simulate fetching feed results from the crossbar using feed hashes
    * @param {string[]} feedHashes - The hashes of the feeds to simulate
    * @param {boolean} [includeReceipts] - Whether to include receipts in the response
+   * @param {Record<string, string>} [variableOverrides] - Request-scoped task variable overrides
+   * @param {string} [network] - Network override for the simulations
    * @returns {Promise<CrossbarSimulateProtoResponse[]>} - The simulated feed results
    */
   async simulateFeeds(
     feedHashes: string[],
-    includeReceipts?: boolean
+    includeReceipts?: boolean,
+    variableOverrides?: Record<string, string>,
+    network?: string
   ): Promise<CrossbarSimulateProtoResponse[]> {
     if (!feedHashes || feedHashes.length === 0)
       throw new Error('At least one feed is required');
 
     return await Promise.all(
-      feedHashes.map(feedHash => this.simulateFeed(feedHash, includeReceipts))
+      feedHashes.map(feedHash =>
+        this.simulateFeed(feedHash, includeReceipts, variableOverrides, network)
+      )
     );
   }
 

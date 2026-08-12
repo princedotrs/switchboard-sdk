@@ -42,10 +42,39 @@ export const SWTCH_MINT = new PublicKey(
 );
 
 /**
- * SWTCH/USDT Feed ID for oracle pricing
+ * Legacy SWTCH/USD feed ID.
+ *
+ * @deprecated Resolve the active feed from subscriber state with
+ * {@link fetchSubscriptionPaymentContext}. A static value cannot safely span
+ * a staggered devnet/mainnet migration.
  */
 export const SWTCH_FEED_ID =
   '148aaedb33ff23593805377f131af7fe01b4770ae2b9e4a2f7f8b3a180314711';
+
+export function normalizeSubscriptionFeedId(feedId: string): string {
+  const normalized = feedId.trim().toLowerCase().replace(/^0x/, '');
+  if (!/^[0-9a-f]{64}$/.test(normalized)) {
+    throw new Error('Feed ID must be 32 bytes (64 hexadecimal characters)');
+  }
+  return normalized;
+}
+
+export interface SubscriberStateConfig {
+  address: PublicKey;
+  authority: PublicKey;
+  epochLength: BN;
+  swtchMint: PublicKey;
+  swtchFeedId: string;
+  admins: PublicKey[];
+  adminCount: number;
+}
+
+export interface SubscriptionPaymentContext {
+  state: PublicKey;
+  swtchMint: PublicKey;
+  swtchFeedId: string;
+  quoteAccount: PublicKey;
+}
 
 /**
  * Subscription account information
@@ -204,7 +233,7 @@ function getTokenVaultPda(
 async function executeWithOracleUpdate(
   connection: Connection,
   queue: Queue,
-  quoteAccount: PublicKey,
+  feedId: string,
   subscriptionIx: web3.TransactionInstruction,
   signer: Keypair
 ): Promise<string> {
@@ -224,10 +253,9 @@ async function executeWithOracleUpdate(
     try {
       const result = await queue.fetchManagedUpdateIxs(
         crossbar,
-        [SWTCH_FEED_ID],
+        [normalizeSubscriptionFeedId(feedId)],
         {
           payer: signer.publicKey,
-          instructionIdx: 0,
         }
       );
       oracleIxs = result;
@@ -272,10 +300,10 @@ async function executeWithOracleUpdate(
 /**
  * Get the canonical oracle quote account PDA
  */
-function getQuoteAccount(queuePubkey: PublicKey): PublicKey {
+function getQuoteAccount(queuePubkey: PublicKey, feedId: string): PublicKey {
   // Use OracleQuote.getCanonicalPubkey directly - same as test file
   const [quoteAccount] = OracleQuote.getCanonicalPubkey(queuePubkey, [
-    SWTCH_FEED_ID,
+    normalizeSubscriptionFeedId(feedId),
   ]);
   return quoteAccount;
 }
@@ -289,10 +317,86 @@ function getQuoteAccount(queuePubkey: PublicKey): PublicKey {
  */
 interface SubscriberProgram extends Program {
   account: {
+    subscriberState: {
+      fetch: (address: PublicKey) => Promise<{
+        authority: PublicKey;
+        epochLength: BN;
+        swtchMint: PublicKey;
+        swtchFeedId: number[] | Uint8Array;
+        admins: PublicKey[];
+        adminCount: number;
+      }>;
+    };
     subscription: {
       fetch: (address: PublicKey) => Promise<SubscriptionInfo>;
     };
   };
+}
+
+export async function fetchSubscriberStateConfig(params: {
+  connection: Connection;
+}): Promise<SubscriberStateConfig> {
+  const programId = SUBSCRIPTION_PROGRAM_ID;
+  const program = await loadSubscriberProgram(params.connection, programId);
+  const [statePda] = getStatePda(programId);
+  const state = await program.account.subscriberState.fetch(statePda);
+  const swtchFeedId = normalizeSubscriptionFeedId(
+    Buffer.from(state.swtchFeedId).toString('hex')
+  );
+  const adminCount = Number(state.adminCount);
+
+  return {
+    address: statePda,
+    authority: state.authority,
+    epochLength: state.epochLength,
+    swtchMint: state.swtchMint,
+    swtchFeedId,
+    admins: state.admins.slice(0, adminCount),
+    adminCount,
+  };
+}
+
+export async function fetchSubscriptionPaymentContext(params: {
+  connection: Connection;
+  queue: Queue;
+}): Promise<SubscriptionPaymentContext> {
+  const state = await fetchSubscriberStateConfig({
+    connection: params.connection,
+  });
+
+  return {
+    state: state.address,
+    swtchMint: state.swtchMint,
+    swtchFeedId: state.swtchFeedId,
+    quoteAccount: getQuoteAccount(params.queue.pubkey, state.swtchFeedId),
+  };
+}
+
+async function resolveSubscriptionPaymentContext(params: {
+  connection: Connection;
+  queue: Queue;
+  paymentContext?: SubscriptionPaymentContext;
+}): Promise<SubscriptionPaymentContext> {
+  const context =
+    params.paymentContext ??
+    (await fetchSubscriptionPaymentContext({
+      connection: params.connection,
+      queue: params.queue,
+    }));
+  const [expectedState] = getStatePda(SUBSCRIPTION_PROGRAM_ID);
+  const feedId = normalizeSubscriptionFeedId(context.swtchFeedId);
+  const expectedQuoteAccount = getQuoteAccount(params.queue.pubkey, feedId);
+
+  if (!context.state.equals(expectedState)) {
+    throw new Error('Subscription payment context has an invalid state PDA');
+  }
+  if (!context.quoteAccount.equals(expectedQuoteAccount)) {
+    throw new Error(
+      'Subscription payment context quote account does not match its queue and feed ID'
+    );
+  }
+
+  return { ...context, swtchFeedId: feedId };
 }
 
 /**
@@ -346,20 +450,22 @@ export async function createSubscription(
 ): Promise<string> {
   const programId = SUBSCRIPTION_PROGRAM_ID;
   const program = await loadSubscriberProgram(params.connection, programId);
+  const paymentContext = await resolveSubscriptionPaymentContext({
+    connection: params.connection,
+    queue: params.queue,
+  });
 
   // Derive PDAs
-  const [statePda] = getStatePda(programId);
   const [tierPda] = getTierPda(params.tierId, programId);
   const [subscriptionPda] = getSubscriptionPda(
     params.payer.publicKey,
     programId
   );
-  const [tokenVaultPda] = getTokenVaultPda(SWTCH_MINT, programId);
+  const [tokenVaultPda] = getTokenVaultPda(paymentContext.swtchMint, programId);
   const payerTokenAccount = getAssociatedTokenAddressSync(
-    SWTCH_MINT,
+    paymentContext.swtchMint,
     params.payer.publicKey
   );
-  const quoteAccount = getQuoteAccount(params.queue.pubkey);
 
   // Build subscription init instruction
   // Note: Program will auto-create SWTCH token account if needed (init_if_needed)
@@ -371,18 +477,18 @@ export async function createSubscription(
       epochAmount: new BN(params.epochAmount),
     })
     .accounts({
-      state: statePda,
+      state: paymentContext.state,
       subscription: subscriptionPda,
       tier: tierPda,
       owner: params.payer.publicKey,
       payer: params.payer.publicKey,
-      paymentMint: SWTCH_MINT,
+      paymentMint: paymentContext.swtchMint,
       payerTokenAccount,
       tokenVault: tokenVaultPda,
       tokenProgram: TOKEN_PROGRAM_ID,
       associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
       systemProgram: SystemProgram.programId,
-      quoteAccount,
+      quoteAccount: paymentContext.quoteAccount,
       sysvars: {
         clock: SYSVAR_CLOCK_PUBKEY,
         slothashes: SYSVAR_SLOT_HASHES_PUBKEY,
@@ -395,7 +501,7 @@ export async function createSubscription(
   return executeWithOracleUpdate(
     params.connection,
     params.queue,
-    quoteAccount,
+    paymentContext.swtchFeedId,
     subscriptionIx,
     params.payer
   );
@@ -420,20 +526,22 @@ export async function upgradeSubscription(
 ): Promise<string> {
   const programId = SUBSCRIPTION_PROGRAM_ID;
   const program = await loadSubscriberProgram(params.connection, programId);
+  const paymentContext = await resolveSubscriptionPaymentContext({
+    connection: params.connection,
+    queue: params.queue,
+  });
 
   // Derive PDAs
-  const [statePda] = getStatePda(programId);
   const [newTierPda] = getTierPda(params.newTierId, programId);
   const [subscriptionPda] = getSubscriptionPda(
     params.owner.publicKey,
     programId
   );
-  const [tokenVaultPda] = getTokenVaultPda(SWTCH_MINT, programId);
+  const [tokenVaultPda] = getTokenVaultPda(paymentContext.swtchMint, programId);
   const ownerTokenAccount = getAssociatedTokenAddressSync(
-    SWTCH_MINT,
+    paymentContext.swtchMint,
     params.owner.publicKey
   );
-  const quoteAccount = getQuoteAccount(params.queue.pubkey);
 
   // Fetch subscription to get current tier
   const subscription =
@@ -448,15 +556,15 @@ export async function upgradeSubscription(
       epochAmount: new BN(params.epochAmount),
     })
     .accounts({
-      state: statePda,
+      state: paymentContext.state,
       subscription: subscriptionPda,
       newTier: newTierPda,
       owner: params.owner.publicKey,
-      paymentMint: SWTCH_MINT,
+      paymentMint: paymentContext.swtchMint,
       payerTokenAccount: ownerTokenAccount,
       tokenVault: tokenVaultPda,
       tokenProgram: TOKEN_PROGRAM_ID,
-      quoteAccount,
+      quoteAccount: paymentContext.quoteAccount,
       sysvars: {
         clock: SYSVAR_CLOCK_PUBKEY,
         slothashes: SYSVAR_SLOT_HASHES_PUBKEY,
@@ -472,7 +580,7 @@ export async function upgradeSubscription(
   return executeWithOracleUpdate(
     params.connection,
     params.queue,
-    quoteAccount,
+    paymentContext.swtchFeedId,
     upgradeIx,
     params.owner
   );
@@ -621,12 +729,19 @@ export async function extendSubscription(
       throw new Error('queue required for paid extends');
     }
 
-    const [tokenVaultPda] = getTokenVaultPda(SWTCH_MINT, programId);
+    const paymentContext = await resolveSubscriptionPaymentContext({
+      connection: params.connection,
+      queue: params.queue,
+    });
+
+    const [tokenVaultPda] = getTokenVaultPda(
+      paymentContext.swtchMint,
+      programId
+    );
     const payerTokenAccount = getAssociatedTokenAddressSync(
-      SWTCH_MINT,
+      paymentContext.swtchMint,
       params.owner.publicKey
     );
-    const quoteAccount = getQuoteAccount(params.queue.pubkey);
 
     const extendIx = await program.methods
       .subscriptionExtend({
@@ -634,16 +749,16 @@ export async function extendSubscription(
         adminExtend: false,
       })
       .accounts({
-        state: statePda,
+        state: paymentContext.state,
         subscription: subscriptionPda,
         tier: tierPda,
         payer: params.owner.publicKey,
-        paymentMint: SWTCH_MINT,
+        paymentMint: paymentContext.swtchMint,
         payerTokenAccount,
         tokenVault: tokenVaultPda,
         tokenProgram: TOKEN_PROGRAM_ID,
         systemProgram: SystemProgram.programId,
-        quoteAccount,
+        quoteAccount: paymentContext.quoteAccount,
         sysvars: {
           clock: SYSVAR_CLOCK_PUBKEY,
           slothashes: SYSVAR_SLOT_HASHES_PUBKEY,
@@ -655,7 +770,7 @@ export async function extendSubscription(
     return executeWithOracleUpdate(
       params.connection,
       params.queue,
-      quoteAccount,
+      paymentContext.swtchFeedId,
       extendIx,
       params.owner
     );
@@ -898,20 +1013,24 @@ export async function createSubscriptionIx(params: {
   contactName?: string;
   contactEmail?: string;
   queue: Queue;
+  paymentContext?: SubscriptionPaymentContext;
 }): Promise<web3.TransactionInstruction> {
   const programId = SUBSCRIPTION_PROGRAM_ID;
   const program = await loadSubscriberProgram(params.connection, programId);
+  const paymentContext = await resolveSubscriptionPaymentContext({
+    connection: params.connection,
+    queue: params.queue,
+    paymentContext: params.paymentContext,
+  });
 
   // Derive PDAs
-  const [statePda] = getStatePda(programId);
   const [tierPda] = getTierPda(params.tierId, programId);
   const [subscriptionPda] = getSubscriptionPda(params.owner, programId);
-  const [tokenVaultPda] = getTokenVaultPda(SWTCH_MINT, programId);
+  const [tokenVaultPda] = getTokenVaultPda(paymentContext.swtchMint, programId);
   const payerTokenAccount = getAssociatedTokenAddressSync(
-    SWTCH_MINT,
+    paymentContext.swtchMint,
     params.owner
   );
-  const quoteAccount = getQuoteAccount(params.queue.pubkey);
 
   // Build subscription init instruction
   const subscriptionIx = await program.methods
@@ -922,18 +1041,18 @@ export async function createSubscriptionIx(params: {
       epochAmount: new BN(params.epochAmount),
     })
     .accounts({
-      state: statePda,
+      state: paymentContext.state,
       subscription: subscriptionPda,
       tier: tierPda,
       owner: params.owner,
       payer: params.owner,
-      paymentMint: SWTCH_MINT,
+      paymentMint: paymentContext.swtchMint,
       payerTokenAccount,
       tokenVault: tokenVaultPda,
       tokenProgram: TOKEN_PROGRAM_ID,
       associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
       systemProgram: SystemProgram.programId,
-      quoteAccount,
+      quoteAccount: paymentContext.quoteAccount,
       sysvars: {
         clock: SYSVAR_CLOCK_PUBKEY,
         slothashes: SYSVAR_SLOT_HASHES_PUBKEY,
@@ -965,20 +1084,24 @@ export async function upgradeSubscriptionIx(params: {
   newTierId: number;
   epochAmount: number;
   queue: Queue;
+  paymentContext?: SubscriptionPaymentContext;
 }): Promise<web3.TransactionInstruction> {
   const programId = SUBSCRIPTION_PROGRAM_ID;
   const program = await loadSubscriberProgram(params.connection, programId);
+  const paymentContext = await resolveSubscriptionPaymentContext({
+    connection: params.connection,
+    queue: params.queue,
+    paymentContext: params.paymentContext,
+  });
 
   // Derive PDAs
-  const [statePda] = getStatePda(programId);
   const [newTierPda] = getTierPda(params.newTierId, programId);
   const [subscriptionPda] = getSubscriptionPda(params.owner, programId);
-  const [tokenVaultPda] = getTokenVaultPda(SWTCH_MINT, programId);
+  const [tokenVaultPda] = getTokenVaultPda(paymentContext.swtchMint, programId);
   const ownerTokenAccount = getAssociatedTokenAddressSync(
-    SWTCH_MINT,
+    paymentContext.swtchMint,
     params.owner
   );
-  const quoteAccount = getQuoteAccount(params.queue.pubkey);
 
   // Fetch subscription to get current tier
   const subscription =
@@ -993,15 +1116,15 @@ export async function upgradeSubscriptionIx(params: {
       epochAmount: new BN(params.epochAmount),
     })
     .accounts({
-      state: statePda,
+      state: paymentContext.state,
       subscription: subscriptionPda,
       newTier: newTierPda,
       owner: params.owner,
-      paymentMint: SWTCH_MINT,
+      paymentMint: paymentContext.swtchMint,
       payerTokenAccount: ownerTokenAccount,
       tokenVault: tokenVaultPda,
       tokenProgram: TOKEN_PROGRAM_ID,
-      quoteAccount,
+      quoteAccount: paymentContext.quoteAccount,
       sysvars: {
         clock: SYSVAR_CLOCK_PUBKEY,
         slothashes: SYSVAR_SLOT_HASHES_PUBKEY,
@@ -1086,6 +1209,7 @@ export async function extendSubscriptionIx(params: {
   epochAmount: number;
   adminExtend?: boolean;
   queue?: Queue;
+  paymentContext?: SubscriptionPaymentContext;
 }): Promise<web3.TransactionInstruction> {
   const programId = SUBSCRIPTION_PROGRAM_ID;
   const program = await loadSubscriberProgram(params.connection, programId);
@@ -1123,12 +1247,20 @@ export async function extendSubscriptionIx(params: {
       throw new Error('queue required for paid extends');
     }
 
-    const [tokenVaultPda] = getTokenVaultPda(SWTCH_MINT, programId);
+    const paymentContext = await resolveSubscriptionPaymentContext({
+      connection: params.connection,
+      queue: params.queue,
+      paymentContext: params.paymentContext,
+    });
+
+    const [tokenVaultPda] = getTokenVaultPda(
+      paymentContext.swtchMint,
+      programId
+    );
     const payerTokenAccount = getAssociatedTokenAddressSync(
-      SWTCH_MINT,
+      paymentContext.swtchMint,
       params.owner
     );
-    const quoteAccount = getQuoteAccount(params.queue.pubkey);
 
     const extendIx = await program.methods
       .subscriptionExtend({
@@ -1136,16 +1268,16 @@ export async function extendSubscriptionIx(params: {
         adminExtend: false,
       })
       .accounts({
-        state: statePda,
+        state: paymentContext.state,
         subscription: subscriptionPda,
         tier: tierPda,
         payer: params.owner,
-        paymentMint: SWTCH_MINT,
+        paymentMint: paymentContext.swtchMint,
         payerTokenAccount,
         tokenVault: tokenVaultPda,
         tokenProgram: TOKEN_PROGRAM_ID,
         systemProgram: SystemProgram.programId,
-        quoteAccount,
+        quoteAccount: paymentContext.quoteAccount,
         sysvars: {
           clock: SYSVAR_CLOCK_PUBKEY,
           slothashes: SYSVAR_SLOT_HASHES_PUBKEY,
@@ -1330,12 +1462,8 @@ export async function initializeState(params: {
   );
 
   // Convert hex string to byte array
-  const hexStr = params.swtchFeedId.replace(/^0x/, '');
+  const hexStr = normalizeSubscriptionFeedId(params.swtchFeedId);
   const swtchFeedId = Array.from(Buffer.from(hexStr, 'hex'));
-
-  if (swtchFeedId.length !== 32) {
-    throw new Error('Feed ID must be 32 bytes (64 hex characters)');
-  }
 
   const stateParams = {
     swtchMint: params.swtchMint,
@@ -1401,12 +1529,9 @@ export async function updateStateConfig(params: {
 
   let swtchFeedIdBytes: number[] | null = null;
   if (params.swtchFeedId) {
-    const hexStr = params.swtchFeedId.replace(/^0x/, '');
-    const bytes = Array.from(Buffer.from(hexStr, 'hex'));
-    if (bytes.length !== 32) {
-      throw new Error('Feed ID must be 32 bytes (64 hex characters)');
-    }
-    swtchFeedIdBytes = bytes;
+    swtchFeedIdBytes = Array.from(
+      Buffer.from(normalizeSubscriptionFeedId(params.swtchFeedId), 'hex')
+    );
   }
 
   const updateParams = {

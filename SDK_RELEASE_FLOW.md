@@ -42,6 +42,7 @@ These are the main SDK paths that Copybara mirrors from `sbv3` into
 | --- | --- | --- |
 | `@switchboard-xyz/on-demand` | `javascript/on-demand` | `solana/javascript/on-demand` |
 | `@switchboard-xyz/common` | `javascript/common` | `javascript/common` |
+| `@switchboard-xyz/sui-sdk` | `javascript/sui-sdk` | `javascript/sui-sdk` |
 | `switchboard-on-demand` | `rust/switchboard-on-demand` | `solana/rust/switchboard-on-demand` |
 | `switchboard-on-demand-client` | `rust/switchboard-on-demand-client` | `solana/rust/switchboard-on-demand-client` |
 | Aptos SDKs | `chains/aptos` | `aptos` |
@@ -183,12 +184,16 @@ After dry-runs:
 Use this order:
 
 1. Merge the `sbv3` release-prep PR.
-2. Let Copybara sync `switchboard-sdk`.
-3. Confirm the mirror contains the same release notes and matching manifests.
-4. Publish from canonical `sbv3` paths.
-5. Verify registry versions after publish.
-6. Update `SDK_RELEASE_NOTES.md` from prepared to published if needed.
-7. Let Copybara mirror the release-note status update.
+2. Let Copybara open or update the `copybara/sbv3-sync` pull request in
+   `switchboard-sdk`.
+3. Review and merge the generated pull request under the mirror repository's
+   normal branch protection.
+4. Confirm the mirror contains the same release notes and matching manifests.
+5. Publish from canonical `sbv3` paths.
+6. Verify registry versions after publish.
+7. Update `SDK_RELEASE_NOTES.md` from prepared to published if needed.
+8. Let Copybara open or update the pull request that mirrors the release-note
+   status change.
 
 Publish commands must run from `sbv3`, for example:
 

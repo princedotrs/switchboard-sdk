@@ -51,6 +51,23 @@ pub async fn load_lookup_tables<T: LutOwner + bytemuck::Pod>(
     client: &RpcClient,
     keys: &[Pubkey],
 ) -> Result<Vec<AddressLookupTableAccount>, AnyhowError> {
+    let program_id = if crate::utils::is_devnet() {
+        crate::ON_DEMAND_DEVNET_PID
+    } else {
+        crate::ON_DEMAND_MAINNET_PID
+    };
+    load_lookup_tables_for_program::<T>(client, keys, &program_id).await
+}
+
+/// Loads lookup tables using an explicit on-demand program ID.
+///
+/// This avoids process-wide network selection for services that handle
+/// mainnet and devnet requests concurrently.
+pub async fn load_lookup_tables_for_program<T: LutOwner + bytemuck::Pod>(
+    client: &RpcClient,
+    keys: &[Pubkey],
+    program_id: &Pubkey,
+) -> Result<Vec<AddressLookupTableAccount>, AnyhowError> {
     // Account data uses v3 Pubkey, but RpcClient expects v2 Pubkey
     let keys_v2: Vec<_> = keys.iter().map(|k| k.to_bytes().into()).collect();
     let accounts_data = client
@@ -70,7 +87,7 @@ pub async fn load_lookup_tables<T: LutOwner + bytemuck::Pod>(
             continue;
         }
         let lut_slot = data.unwrap().lut_slot();
-        let lut_signer: Pubkey = find_lut_signer(&keys[idx]);
+        let lut_signer: Pubkey = find_lut_signer_for_program(&keys[idx], program_id);
         let lut_key = derive_lookup_table_address(&lut_signer.to_bytes().into(), lut_slot).0;
         lut_keys.push(lut_key.to_bytes().into());
     }

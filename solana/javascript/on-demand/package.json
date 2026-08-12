@@ -1,6 +1,6 @@
 {
   "name": "@switchboard-xyz/on-demand",
-  "version": "3.10.4",
+  "version": "3.10.6",
   "description": "A Typescript client to interact with Switchboard On-Demand.",
   "license": "ISC",
   "main": "dist/cjs/index.js",
@@ -26,10 +26,12 @@
     "lint": "eslint \"src/**/*.ts\"",
     "lint:fix": "eslint \"src/**/*.ts\" --fix",
     "prepack": "pnpm build",
-    "test": "pnpm exec jest --passWithNoTests",
+    "test": "pnpm run test:ed25519-instruction-utils && pnpm run test:managed-update-instruction-utils && pnpm exec jest --passWithNoTests",
+    "test:ed25519-instruction-utils": "pnpm exec tsx test/ed25519InstructionUtils.smoke.ts",
+    "test:managed-update-instruction-utils": "pnpm exec tsx test/managedUpdateInstructionUtils.smoke.ts",
     "test:authority-quote": "pnpm exec tsx test/oracleQuote.authority.smoke.ts",
     "test:pull-feed-discriminators": "pnpm exec tsx test/pullFeed.discriminators.smoke.ts",
-    "test:pull-feed-success": "pnpm exec tsx test/pullFeed.success.test.ts",
+    "test:pull-feed-success": "pnpm exec tsx test/pullFeed.success.smoke.ts",
     "test:randomness-close-lut": "pnpm exec tsx test/randomness.closeLutIx.smoke.ts"
   },
   "dependencies": {
@@ -39,7 +41,7 @@
     "@solana/spl-token": "^0.4.14",
     "@solana/web3.js": "^1.98.4",
     "@switchboard-xyz/common": "latest",
-    "@switchboard-xyz/common-legacy": "^1.1.0",
+    "@switchboard-xyz/common-legacy": "latest",
     "axios": "^1.9",
     "bs58": "^6.0.0",
     "buffer": "^6.0.3",

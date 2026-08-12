@@ -137,6 +137,8 @@ export type FetchSignaturesConsensusRequest = {
   feedRequests: FeedRequest[];
   numOracles: number;
   useTimestamp?: boolean;
+  /** Request-scoped task variable overrides, including customer API keys. */
+  variableOverrides?: Record<string, string>;
 };
 
 /**

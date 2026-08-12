@@ -11,7 +11,18 @@ pub fn find_lut_signer<K: AsRef<[u8]>, P: From<[u8; 32]>>(k: &K) -> P {
     } else {
         ON_DEMAND_MAINNET_PID
     };
-    let (pk, _) = Pubkey::find_program_address(&[LUT_SIGNER_SEED, k.as_ref()], &pid);
+    find_lut_signer_for_program(k, &pid)
+}
+
+/// Finds the address lookup table signer PDA for a given key and program ID.
+///
+/// Use this when one process serves more than one Solana cluster and cannot
+/// rely on the process-wide `SB_ENV` setting.
+pub fn find_lut_signer_for_program<K: AsRef<[u8]>, P: From<[u8; 32]>>(
+    k: &K,
+    program_id: &Pubkey,
+) -> P {
+    let (pk, _) = Pubkey::find_program_address(&[LUT_SIGNER_SEED, k.as_ref()], program_id);
     P::from(pk.to_bytes())
 }
 
@@ -33,5 +44,29 @@ cfg_client! {
             addresses: lut.addresses.iter().cloned().collect(),
         };
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn explicit_program_ids_derive_distinct_lut_signers() {
+        let key = Pubkey::new_from_array([7u8; 32]);
+        let mainnet_signer: Pubkey = find_lut_signer_for_program(&key, &ON_DEMAND_MAINNET_PID);
+        let devnet_signer: Pubkey = find_lut_signer_for_program(&key, &ON_DEMAND_DEVNET_PID);
+
+        assert_ne!(mainnet_signer, devnet_signer);
+        assert_eq!(
+            mainnet_signer,
+            Pubkey::find_program_address(&[LUT_SIGNER_SEED, key.as_ref()], &ON_DEMAND_MAINNET_PID,)
+                .0
+        );
+        assert_eq!(
+            devnet_signer,
+            Pubkey::find_program_address(&[LUT_SIGNER_SEED, key.as_ref()], &ON_DEMAND_DEVNET_PID,)
+                .0
+        );
     }
 }

@@ -1,0 +1,53 @@
+{
+  "name": "@switchboard-xyz/sui-sdk",
+  "version": "0.1.17",
+  "description": "API wrapper for intergating with the Switchboard program on our Sui implementation",
+  "license": "MIT",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/esm/index.d.ts",
+      "import": "./dist/esm/index.js",
+      "require": "./dist/cjs/index.js"
+    }
+  },
+  "main": "./dist/cjs/index.js",
+  "module": "./dist/esm/index.js",
+  "types": "./dist/esm/index.d.ts",
+  "files": [
+    "dist",
+    "src",
+    "package.json",
+    "package-lock.json"
+  ],
+  "scripts": {
+    "prebuild": "pnpm lint",
+    "build": "pnpm exec shx rm -rf dist || true; pnpm exec tsc && pnpm exec tsc -p tsconfig.cjs.json && echo '{\"type\":\"commonjs\"}' > dist/cjs/package.json",
+    "check-types": "tsc --noEmit",
+    "docgen": "typedoc --out ./docs/ ./src",
+    "docgen:deploy": "pnpm docgen && firebase deploy --project switchboard-docs --only hosting:switchboard-sui-sdk",
+    "lint": "eslint src",
+    "lint:fix": "eslint src --fix",
+    "prepack": "pnpm build",
+    "test": "pnpm exec tsx --test tests/*.test.ts",
+    "test:variable-overrides": "pnpm exec tsx tests/aggregator-variable-overrides.test.ts"
+  },
+  "dependencies": {
+    "@isaacs/ttlcache": "^1.4.1",
+    "@mysten/sui": "^1",
+    "@switchboard-xyz/common": "latest",
+    "@switchboard-xyz/common-legacy": "latest",
+    "bs58": "^6.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "20.19.11",
+    "eslint": "^9.22.0",
+    "eslint-plugin-simple-import-sort": "^12.1.1",
+    "shx": "0.3.4",
+    "tsx": "4.20.4",
+    "typescript": "5.9.2"
+  },
+  "engines": {
+    "node": ">=21.0.0"
+  }
+}

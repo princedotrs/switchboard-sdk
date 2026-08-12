@@ -1,4 +1,3 @@
-use switchboard_protos::OracleJob;
 use base64::prelude::*;
 use prost::Message;
 use reqwest::header::CONTENT_TYPE;
@@ -6,6 +5,32 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::Duration;
+use switchboard_protos::OracleJob;
+
+const MAX_VARIANCE_SCALE: u64 = 1_000_000_000;
+
+fn scale_human_max_variance(max_variance: Option<u32>) -> u64 {
+    u64::from(max_variance.unwrap_or(1)) * MAX_VARIANCE_SCALE
+}
+
+#[derive(Debug)]
+pub(crate) struct FetchSignaturesScaledParams {
+    pub recent_hash: Option<String>,
+    pub encoded_jobs: Vec<String>,
+    pub num_signatures: u32,
+    /// Exact 1e9-scaled integer used by the gateway checksum.
+    pub max_variance_scaled: u64,
+    pub min_responses: Option<u32>,
+    pub use_timestamp: Option<bool>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct FetchSignaturesConsensusScaledParams {
+    pub recent_hash: Option<String>,
+    pub feed_configs: Vec<BatchFeedRequest>,
+    pub use_timestamp: Option<bool>,
+    pub num_signatures: Option<u32>,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MedianResponse {
@@ -194,6 +219,21 @@ impl Gateway {
         &self,
         params: FetchSignaturesParams,
     ) -> Result<FeedEvalResponseSingle, reqwest::Error> {
+        self.fetch_signatures_from_encoded_scaled(FetchSignaturesScaledParams {
+            recent_hash: params.recent_hash,
+            encoded_jobs: params.encoded_jobs,
+            num_signatures: params.num_signatures,
+            max_variance_scaled: scale_human_max_variance(params.max_variance),
+            min_responses: params.min_responses,
+            use_timestamp: params.use_timestamp,
+        })
+        .await
+    }
+
+    pub(crate) async fn fetch_signatures_from_encoded_scaled(
+        &self,
+        params: FetchSignaturesScaledParams,
+    ) -> Result<FeedEvalResponseSingle, reqwest::Error> {
         let url = format!("{}/gateway/api/v1/fetch_signatures", self.gateway_url);
         let body = serde_json::json!({
             "api_version": "1.0.0",
@@ -202,7 +242,7 @@ impl Gateway {
             "signature_scheme": "Secp256k1",
             "hash_scheme": "Sha256",
             "num_oracles": params.num_signatures,
-            "max_variance": (params.max_variance.unwrap_or(1) as f64 * 1e9) as u64,
+            "max_variance": params.max_variance_scaled,
             "min_responses": params.min_responses.unwrap_or(1),
             "use_timestamp": params.use_timestamp.unwrap_or(false),
         });
@@ -213,12 +253,10 @@ impl Gateway {
             .header(CONTENT_TYPE, "application/json")
             .json(&body)
             .send()
-            .await?;
+            .await?
+            .error_for_status()?;
 
-        let raw = res.text().await?;
-        let res = serde_json::from_str::<FeedEvalResponseSingle>(&raw).unwrap();
-
-        Ok(res)
+        res.json::<FeedEvalResponseSingle>().await
     }
 
     /// Fetches signatures from the gateway using the multi-feed method
@@ -238,10 +276,9 @@ impl Gateway {
         let mut feed_requests = vec![];
 
         for config in params.feed_configs {
-            let max_variance = (config.max_variance.unwrap_or(1) as f64 * 1e9) as u64;
             feed_requests.push(serde_json::json!({
                 "jobs_b64_encoded": config.encoded_jobs,
-                "max_variance": max_variance,
+                "max_variance": scale_human_max_variance(config.max_variance),
                 "min_responses": config.min_responses.unwrap_or(1),
                 "use_timestamp": params.use_timestamp.unwrap_or(false),
             }));
@@ -262,7 +299,8 @@ impl Gateway {
             .header(CONTENT_TYPE, "application/json")
             .json(&body)
             .send()
-            .await?;
+            .await?
+            .error_for_status()?;
         let res = res.json::<FetchSignaturesMultiResponse>().await?;
 
         Ok(res)
@@ -292,7 +330,8 @@ impl Gateway {
             .header(CONTENT_TYPE, "application/json")
             .json(&req)
             .send()
-            .await?;
+            .await?
+            .error_for_status()?;
 
         let response = res.json::<FetchSignaturesBatchResponse>().await?;
         Ok(response)
@@ -302,23 +341,42 @@ impl Gateway {
         &self,
         params: FetchSignaturesConsensusParams,
     ) -> Result<FetchSignaturesConsensusResponse, reqwest::Error> {
+        let feed_configs = params
+            .feed_configs
+            .into_iter()
+            .map(|config| BatchFeedRequest {
+                jobs_b64_encoded: config.encoded_jobs,
+                max_variance: scale_human_max_variance(config.max_variance),
+                min_responses: config.min_responses.unwrap_or(1),
+            })
+            .collect();
+
+        self.fetch_signatures_consensus_scaled(FetchSignaturesConsensusScaledParams {
+            recent_hash: params.recent_hash,
+            feed_configs,
+            use_timestamp: params.use_timestamp,
+            num_signatures: params.num_signatures,
+        })
+        .await
+    }
+
+    pub(crate) async fn fetch_signatures_consensus_scaled(
+        &self,
+        params: FetchSignaturesConsensusScaledParams,
+    ) -> Result<FetchSignaturesConsensusResponse, reqwest::Error> {
         let url = format!(
             "{}/gateway/api/v1/fetch_signatures_consensus",
             self.gateway_url
         );
         println!("Fetching signatures from: {}", url);
-        // Build feed_requests array from feed_configs
         let feed_requests: Vec<serde_json::Value> = params
             .feed_configs
             .iter()
             .map(|config| {
-                // If max_variance or min_responses are not provided, use default values.
-                let max_variance = config.max_variance.unwrap_or(1);
-                let min_responses = config.min_responses.unwrap_or(1);
                 serde_json::json!({
-                    "jobs_b64_encoded": config.encoded_jobs,
-                    "max_variance": (max_variance as f64 * 1e9) as u64,
-                    "min_responses": min_responses,
+                    "jobs_b64_encoded": config.jobs_b64_encoded,
+                    "max_variance": config.max_variance,
+                    "min_responses": config.min_responses,
                     "use_timestamp": params.use_timestamp.unwrap_or(false)
                 })
             })
@@ -339,7 +397,8 @@ impl Gateway {
             .header(CONTENT_TYPE, "application/json")
             .json(&body)
             .send()
-            .await?;
+            .await?
+            .error_for_status()?;
 
         let response = res.json::<FetchSignaturesConsensusResponse>().await?;
         Ok(response)
@@ -416,4 +475,165 @@ pub fn encode_jobs(job_array: &[OracleJob]) -> Vec<String> {
         .iter()
         .map(|job| BASE64_STANDARD.encode(job.encode_length_delimited_to_vec()))
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::Value;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+    use tokio::sync::oneshot;
+
+    async fn capture_request(
+        status: &'static str,
+        response_body: &'static str,
+    ) -> (String, oneshot::Receiver<Value>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (sender, receiver) = oneshot::channel();
+
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut buffer = [0_u8; 4096];
+
+            let body_start = loop {
+                let bytes_read = stream.read(&mut buffer).await.unwrap();
+                assert_ne!(bytes_read, 0, "request ended before its headers");
+                request.extend_from_slice(&buffer[..bytes_read]);
+
+                if let Some(header_end) = request.windows(4).position(|bytes| bytes == b"\r\n\r\n")
+                {
+                    let body_start = header_end + 4;
+                    let headers = std::str::from_utf8(&request[..header_end]).unwrap();
+                    let content_length = headers
+                        .lines()
+                        .find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            name.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse::<usize>().unwrap())
+                        })
+                        .unwrap_or(0);
+                    if request.len() >= body_start + content_length {
+                        break body_start;
+                    }
+                }
+            };
+
+            let body = serde_json::from_slice(&request[body_start..]).unwrap();
+            sender.send(body).unwrap();
+
+            let response = format!(
+                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response_body}",
+                response_body.len()
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+        });
+
+        (format!("http://{address}"), receiver)
+    }
+
+    #[test]
+    fn human_max_variance_scaling_preserves_existing_semantics() {
+        assert_eq!(scale_human_max_variance(None), 1_000_000_000);
+        assert_eq!(scale_human_max_variance(Some(0)), 0);
+        assert_eq!(scale_human_max_variance(Some(1)), 1_000_000_000);
+        assert_eq!(
+            scale_human_max_variance(Some(u32::MAX)),
+            u64::from(u32::MAX) * 1_000_000_000
+        );
+    }
+
+    #[tokio::test]
+    async fn scaled_single_request_preserves_exact_max_variance() {
+        for max_variance in [0, 8_271_619, 1_000_000_000, 1_234_567_891, u64::MAX] {
+            let (url, request) = capture_request(
+                "200 OK",
+                r#"{"responses":[],"caller":"test","failures":[]}"#,
+            )
+            .await;
+            let gateway = Gateway::new(url);
+
+            gateway
+                .fetch_signatures_from_encoded_scaled(FetchSignaturesScaledParams {
+                    recent_hash: Some("recent".to_string()),
+                    encoded_jobs: vec!["job".to_string()],
+                    num_signatures: 1,
+                    max_variance_scaled: max_variance,
+                    min_responses: Some(1),
+                    use_timestamp: Some(false),
+                })
+                .await
+                .unwrap();
+
+            let request = request.await.unwrap();
+            assert_eq!(request["max_variance"].as_u64(), Some(max_variance));
+        }
+    }
+
+    #[tokio::test]
+    async fn scaled_consensus_request_preserves_exact_max_variance() {
+        let (url, request) =
+            capture_request("200 OK", r#"{"median_responses":[],"oracle_responses":[]}"#).await;
+        let gateway = Gateway::new(url);
+
+        gateway
+            .fetch_signatures_consensus_scaled(FetchSignaturesConsensusScaledParams {
+                recent_hash: Some("recent".to_string()),
+                feed_configs: vec![BatchFeedRequest {
+                    jobs_b64_encoded: vec!["job".to_string()],
+                    max_variance: 8_271_619,
+                    min_responses: 1,
+                }],
+                use_timestamp: Some(false),
+                num_signatures: Some(1),
+            })
+            .await
+            .unwrap();
+
+        let request = request.await.unwrap();
+        assert_eq!(request["feed_requests"][0]["max_variance"], 8_271_619);
+    }
+
+    #[tokio::test]
+    async fn gateway_http_errors_are_returned() {
+        let (url, _request) = capture_request("500 Internal Server Error", "{}").await;
+        let gateway = Gateway::new(url);
+
+        let error = gateway
+            .fetch_signatures_from_encoded_scaled(FetchSignaturesScaledParams {
+                recent_hash: None,
+                encoded_jobs: vec![],
+                num_signatures: 1,
+                max_variance_scaled: 0,
+                min_responses: None,
+                use_timestamp: None,
+            })
+            .await
+            .unwrap_err();
+
+        assert_eq!(
+            error.status(),
+            Some(reqwest::StatusCode::INTERNAL_SERVER_ERROR)
+        );
+    }
+
+    #[tokio::test]
+    async fn malformed_gateway_json_is_returned_as_an_error() {
+        let (url, _request) = capture_request("200 OK", "not json").await;
+        let gateway = Gateway::new(url);
+
+        assert!(gateway
+            .fetch_signatures_from_encoded_scaled(FetchSignaturesScaledParams {
+                recent_hash: None,
+                encoded_jobs: vec![],
+                num_signatures: 1,
+                max_variance_scaled: 0,
+                min_responses: None,
+                use_timestamp: None,
+            })
+            .await
+            .is_err());
+    }
 }

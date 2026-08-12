@@ -1,3 +1,4 @@
+import { encodeGatewayFeedRequests } from './internal/gateway-feed-request.js';
 import type {
   AttestEnclaveResponse,
   BridgeEnclaveResponse,
@@ -9,15 +10,21 @@ import type {
   PingResponse,
   RandomnessRevealResponse,
 } from './types/gateway.js';
-import { OracleFeedUtils, OracleJobUtils } from './utils/index.js';
 import { CrossbarClient } from './crossbar-client.js';
-import type { IOracleJob } from './protos.js';
+import {
+  GatewayRequestError,
+  summarizeGatewayRequestError,
+} from './gateway-request-error.js';
 
 import type { AxiosInstance } from 'axios';
 import axios from 'axios';
 import bs58 from 'bs58';
 
 // Re-export all gateway types
+export {
+  GatewayRequestError,
+  summarizeGatewayRequestError,
+} from './gateway-request-error.js';
 export * from './types/gateway.js';
 
 const TIMEOUT = 10_000;
@@ -28,15 +35,6 @@ const axiosClient: () => AxiosInstance = (() => {
 })();
 
 /**
- * Helper function to encode an array of oracle jobs to base64 strings
- */
-function encodeJobs(jobs: IOracleJob[]): string[] {
-  return jobs.map(job =>
-    OracleJobUtils.serializeOracleJob(job).toString('base64')
-  );
-}
-
-/**
  * Gateway - Interface to Switchboard Oracle Network
  *
  * The Gateway class provides methods to interact with Switchboard's oracle network,
@@ -44,12 +42,23 @@ function encodeJobs(jobs: IOracleJob[]): string[] {
  *
  * ## Variable Overrides
  *
- * Many methods support `variableOverrides` which allow you to inject custom values
- * into oracle job execution. This is particularly useful for:
+ * Many methods support `variableOverrides`, which replace matching `${NAME}`
+ * placeholders in string-valued task fields for one execution request. Overrides
+ * can supply credentials, endpoints, or other request-scoped values without changing
+ * the stored oracle job definition.
  *
- * - **API Keys**: Securely pass API credentials without hardcoding in job definitions
- * - **Environment Config**: Switch between dev/staging/prod endpoints dynamically
- * - **Custom Parameters**: Override any variable defined in your oracle jobs
+ * ### Trust Model
+ *
+ * Override values are execution inputs selected by the requester. The feed identity
+ * commits to the stored job definition, and oracle signatures commit to that identity
+ * and the resulting value, but neither commits to the override map itself.
+ *
+ * Semantic overrides, such as URLs, symbols, paths, or calculation parameters, are
+ * appropriate when the update path is controlled and feed consumers intentionally
+ * trust the requester to select those values. For permissionlessly updated feeds,
+ * keep data sources, data selection, and calculations fixed in the job definition.
+ * Credentials are the usual override because they grant access without intentionally
+ * changing the feed's declared semantics.
  *
  * ### How Variable Overrides Work
  *
@@ -59,26 +68,65 @@ function encodeJobs(jobs: IOracleJob[]): string[] {
  * 3. Execute the jobs with the overridden values
  * 4. Return signed oracle responses
  *
+ * Overrides are substitution-based. Override names are not automatically routed
+ * to a service. A task must contain a matching `${NAME}` reference unless its
+ * documentation explicitly defines a reserved override.
+ *
+ * ### API Key Behavior
+ *
+ * For new jobs, API-key overrides follow the same pattern across services:
+ * put a `${NAME}` placeholder in the task's API-key field and provide the
+ * matching `NAME` value in `variableOverrides`.
+ *
+ * | Task | Preferred task setting | Request setting |
+ * | --- | --- | --- |
+ * | `JupiterSwapTask` | `apiKey: "${NAME}"` | Matching `NAME` |
+ * | Pyth Hermes (`pythAddress`) | `pythConfigs.apiKey: "${NAME}"` | Matching `NAME` |
+ *
+ * For Jupiter, `JUPITER_API_KEY` is a naming convention rather than a reserved
+ * override. Supplying it without a matching `apiKey: "${JUPITER_API_KEY}"`
+ * placeholder does not change the task's authentication. A non-empty literal
+ * `apiKey` is also accepted. Each Jupiter task resolves its own field, so one
+ * job may mix different keys and tasks that use the built-in compatibility key.
+ * Missing or literal blank fields use that built-in key. An unresolved
+ * placeholder, or a placeholder whose effective cache/override value is blank,
+ * fails before Jupiter is contacted. A preceding `CacheTask` value takes normal
+ * substitution precedence over a request override with the same name.
+ *
+ * For Pyth Hermes, `PYTH_API_KEY` is also a reserved compatibility fallback
+ * for jobs that omit or leave `pythConfigs.apiKey` empty. The fallback is
+ * request-wide: every `pythAddress` task in that execution without its own
+ * non-empty `apiKey` receives the same key. A non-empty task field wins, so
+ * separate Pyth tasks can use different placeholders and keys. `pythPushFeedId`
+ * reads an on-chain account and does not use a Hermes API key.
+ *
  * ### Example Usage
  *
  * \`\`\`typescript
- * // Your oracle job might reference ${API_KEY} and ${NETWORK}
+ * const apiKey = process.env.API_KEY;
+ * if (!apiKey) throw new Error('API_KEY is required');
+ *
+ * // `oracleJob` contains an ${API_KEY} placeholder in an authentication field.
  * const overrides = {
- *   "API_KEY": "your-secret-key",
- *   "NETWORK": "mainnet"
+ *   API_KEY: apiKey,
  * };
  *
- * const response = await gateway.fetchSignatures({
- *   recentHash: slothash,
- *   encodedJobs: [jobBase64],
+ * const response = await gateway.fetchSignaturesConsensus({
+ *   feedConfigs: [
+ *     {
+ *       jobs: [oracleJob],
+ *       maxVariance: 1,
+ *       minResponses: 1,
+ *     },
+ *   ],
  *   numSignatures: 3,
- *   variableOverrides: overrides
+ *   variableOverrides: overrides,
  * });
  * \`\`\`
  *
  * ### Best Practices
  *
- * 1. **Security**: Never hardcode sensitive API keys in jobs - use overrides
+ * 1. **Security**: Prefer overrides when credentials should be supplied per request
  * 2. **Environment Management**: Use overrides to switch between dev/staging/prod
  * 3. **Flexibility**: Design jobs with variables for maximum reusability
  * 4. **Validation**: Ensure all required variables are provided in overrides
@@ -199,6 +247,8 @@ export class Gateway {
    *
    * @param feedConfigs Array of feed configurations to fetch signatures for.
    * V1 feed config `maxVariance` is a human percent (1 = 1%) and is scaled by 1e9 here.
+   * Use `maxVarianceScaled` instead when forwarding an exact 1e9-scaled integer,
+   * such as a value read from an on-chain account. Do not provide both fields.
    * V2 feed config `feed.maxJobRangePct` must already be a raw scaled integer (1_000_000_000 = 1%).
    * @param useTimestamp Whether to use the timestamp in the response & to encode update signature.
    * @param numSignatures The number of oracles to fetch signatures from.
@@ -225,17 +275,10 @@ export class Gateway {
       );
     }
 
-    const feedRequests = isV1
-      ? feedConfigs.map(config => ({
-          jobs_b64_encoded: encodeJobs(config.jobs),
-          max_variance: Math.floor(Number(config.maxVariance ?? 1) * 1e9),
-          min_responses: config.minResponses ?? 1,
-        }))
-      : feedConfigs.map(config => ({
-          feed_proto_b64: OracleFeedUtils.serializeOracleFeed(
-            config.feed
-          ).toString('base64'),
-        }));
+    const feedRequests = encodeGatewayFeedRequests(
+      feedConfigs,
+      isV1 ? 'v1' : 'v2'
+    );
 
     // if numSignatures is provided, use it, otherwise use the max of the minOracleSamples for each feed (or 1 for v1)
     const numOracles =
@@ -264,8 +307,17 @@ export class Gateway {
       const resp = await axiosClient()(url, { method, headers, data });
       return resp.data;
     } catch (err) {
-      console.error('fetchSignaturesConsensus error', err);
-      throw err;
+      const error = GatewayRequestError.sanitizeAxios(
+        'Gateway.fetchSignaturesConsensus',
+        err
+      );
+      console.error(
+        'fetchSignaturesConsensus error',
+        error instanceof GatewayRequestError
+          ? error.toJSON()
+          : summarizeGatewayRequestError(error)
+      );
+      throw error;
     }
   }
 
@@ -378,8 +430,17 @@ export class Gateway {
       const resp = await axiosClient()(url, { method, headers, data });
       return resp.data;
     } catch (err) {
-      console.error('fetchQuote error', err);
-      throw err;
+      const error = GatewayRequestError.sanitizeAxios(
+        'Gateway.fetchQuote',
+        err
+      );
+      console.error(
+        'fetchQuote error',
+        error instanceof GatewayRequestError
+          ? error.toJSON()
+          : summarizeGatewayRequestError(error)
+      );
+      throw error;
     }
   }
 
@@ -464,8 +525,17 @@ export class Gateway {
       });
       return JSON.parse(txtResponse.data);
     } catch (err) {
-      console.error('fetchRandomnessReveal error', err);
-      throw err;
+      const error = GatewayRequestError.sanitizeAxios(
+        'Gateway.fetchRandomnessReveal',
+        err
+      );
+      console.error(
+        'fetchRandomnessReveal error',
+        error instanceof GatewayRequestError
+          ? error.toJSON()
+          : summarizeGatewayRequestError(error)
+      );
+      throw error;
     }
   }
 
@@ -509,8 +579,17 @@ export class Gateway {
       });
       return response.data;
     } catch (err) {
-      console.error('fetchHealthyOracles error', err);
-      throw err;
+      const error = GatewayRequestError.sanitizeAxios(
+        'Gateway.fetchHealthyOracles',
+        err
+      );
+      console.error(
+        'fetchHealthyOracles error',
+        error instanceof GatewayRequestError
+          ? error.toJSON()
+          : summarizeGatewayRequestError(error)
+      );
+      throw error;
     }
   }
 
@@ -554,8 +633,17 @@ export class Gateway {
       });
       return response.data;
     } catch (err) {
-      console.error('fetchClock error', err);
-      throw err;
+      const error = GatewayRequestError.sanitizeAxios(
+        'Gateway.fetchClock',
+        err
+      );
+      console.error(
+        'fetchClock error',
+        error instanceof GatewayRequestError
+          ? error.toJSON()
+          : summarizeGatewayRequestError(error)
+      );
+      throw error;
     }
   }
 
