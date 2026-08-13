@@ -6,6 +6,7 @@ import { Oracle } from '../src/oracle/index.ts';
 import { Queue } from '../src/queue/index.ts';
 
 const AGGREGATOR_ID = `0x${'a'.repeat(64)}`;
+const SECOND_AGGREGATOR_ID = `0x${'e'.repeat(64)}`;
 const ORACLE_ID = `0x${'b'.repeat(64)}`;
 const QUEUE_ID = `0x${'c'.repeat(64)}`;
 const SWITCHBOARD_ID = `0x${'d'.repeat(64)}`;
@@ -167,6 +168,82 @@ test('fetchManyUpdateTx forwards variable overrides through retries', async () =
     assert.deepEqual(result.failures, ['initial failure']);
     assert.deepEqual(splitCalls, [[0]]);
     assert.equal(moveCalls.length, 1);
+  } finally {
+    Aggregator.fetchUpdateForMultiple = originalFetchUpdateForMultiple;
+    Aggregator.prototype.loadData = originalLoadData;
+    Queue.prototype.loadData = originalLoadQueueData;
+    Oracle.prototype.loadData = originalLoadOracleData;
+  }
+});
+
+test('fetchManyUpdateTx targets duplicate-hash aggregators separately', async () => {
+  const calls: string[][] = [];
+  const originalFetchUpdateForMultiple = Aggregator.fetchUpdateForMultiple;
+  const originalLoadData = Aggregator.prototype.loadData;
+  const originalLoadQueueData = Queue.prototype.loadData;
+  const originalLoadOracleData = Oracle.prototype.loadData;
+  const splitCalls: unknown[][] = [];
+  const moveCalls: Array<{ arguments: unknown[] }> = [];
+
+  Aggregator.fetchUpdateForMultiple = async (_network, aggregatorIds) => {
+    calls.push(aggregatorIds);
+    const isFirstAggregator = aggregatorIds[0] === AGGREGATOR_ID;
+    return {
+      responses: [
+        {
+          fee: isFirstAggregator ? 7 : 9,
+          feedConfigs: { feedHash: '0xfeed' },
+          results: [
+            {
+              signature: '11',
+              successValue: isFirstAggregator ? '1' : '2',
+              oracleId: ORACLE_ID,
+              isNegative: false,
+              timestamp: 1,
+            },
+          ],
+        } as any,
+      ],
+      failures: [],
+    };
+  };
+  Aggregator.prototype.loadData = async function () {
+    return { feedHash: 'feed', id: this.address, minSampleSize: 1 } as any;
+  };
+  Queue.prototype.loadData = async () =>
+    ({ existingOracles: [{ oracleId: ORACLE_ID }] }) as any;
+  Oracle.prototype.loadData = async () => validOracleData();
+
+  try {
+    const result = await Aggregator.fetchManyUpdateTx(
+      {
+        state: {
+          mainnet: false,
+          oracleQueueId: QUEUE_ID,
+          switchboardAddress: SWITCHBOARD_ID,
+        },
+      } as any,
+      [AGGREGATOR_ID, SECOND_AGGREGATOR_ID],
+      {
+        ...transactionValueHelpers(),
+        gas: {},
+        splitCoins: (_coin: unknown, amounts: unknown[]) => {
+          splitCalls.push(amounts);
+          return amounts.map(() => ({}));
+        },
+        moveCall: (call: { arguments: unknown[] }) => moveCalls.push(call),
+      } as any,
+      { maxRetries: 0 }
+    );
+
+    assert.deepEqual(calls, [[AGGREGATOR_ID], [SECOND_AGGREGATOR_ID]]);
+    assert.deepEqual(splitCalls, [[7, 9]]);
+    assert.deepEqual(
+      moveCalls.map(call => call.arguments[0]),
+      [AGGREGATOR_ID, SECOND_AGGREGATOR_ID]
+    );
+    assert.equal(result.responses.length, 2);
+    assert.deepEqual(result.failures, []);
   } finally {
     Aggregator.fetchUpdateForMultiple = originalFetchUpdateForMultiple;
     Aggregator.prototype.loadData = originalLoadData;

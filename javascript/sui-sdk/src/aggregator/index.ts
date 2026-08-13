@@ -74,7 +74,19 @@ export interface AggregatorFetchUpdateIxParams extends CommonOptions {
 
 export interface AggregatorFetchUpdateTxParams
   extends CommonOptions,
-    AggregatorFetchManyUpdateTxParams {}
+    AggregatorFetchManyUpdateTxParams {
+  /** @deprecated This option is not used by fetchUpdateTx. */
+  solanaRPCUrl?: string;
+
+  /** @deprecated This option is not used by fetchUpdateTx. */
+  feedConfigs?: AggregatorConfigs;
+
+  /** @deprecated This option is not used by fetchUpdateTx. */
+  queue?: Queue;
+
+  /** @deprecated This option is not used by fetchUpdateTx. */
+  jobs?: OracleJob[];
+}
 
 export interface AggregatorFetchManyUpdateTxParams {
   crossbarClient?: CrossbarClient;
@@ -704,53 +716,106 @@ export class Aggregator {
       aggregatorIds.map(id => new Aggregator(switchboardClient, id).loadData())
     );
 
-    const feedHashToAggregatorId = new Map<string, string>();
     const requiredResponses = new Map<string, number>();
     for (const aggregator of aggregators) {
-      const feedHash = normalizeHex(aggregator.feedHash);
-      feedHashToAggregatorId.set(feedHash, aggregator.id);
-      requiredResponses.set(feedHash, Math.max(aggregator.minSampleSize, 1));
+      requiredResponses.set(
+        aggregator.id,
+        Math.max(aggregator.minSampleSize, 1)
+      );
     }
 
-    const acceptedResponses: FetchUpdateResponse[] = [];
+    const acceptedResponses: Array<{
+      aggregatorId: string;
+      response: FetchUpdateResponse;
+    }> = [];
     const acceptedOracleIds = new Map<string, Set<string>>();
     const failures: string[] = [];
     const maxRetries = options?.maxRetries ?? 3;
     const retryDelayMs = options?.retryDelayMs ?? 1000;
 
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
-      const pendingAggregatorIds = aggregators
-        .filter(aggregator => {
-          const feedHash = normalizeHex(aggregator.feedHash);
-          return (
-            (acceptedOracleIds.get(feedHash)?.size ?? 0) <
-            (requiredResponses.get(feedHash) ?? 1)
-          );
-        })
-        .map(aggregator => aggregator.id);
+      const pendingAggregators = aggregators.filter(
+        aggregator =>
+          (acceptedOracleIds.get(aggregator.id)?.size ?? 0) <
+          (requiredResponses.get(aggregator.id) ?? 1)
+      );
 
-      if (pendingAggregatorIds.length === 0) break;
+      if (pendingAggregators.length === 0) break;
 
-      let updateResult: {
-        responses: FetchUpdateResponse[];
-        failures: string[];
-      };
-      try {
-        updateResult = await this.fetchUpdateForMultiple(
-          mainnet ? 'mainnet' : 'testnet',
-          pendingAggregatorIds,
-          { ...options, maxRetries: 0, minResponsesRequired: 1 }
-        );
-      } catch {
-        failures.push('Crossbar request failed');
-        if (attempt < maxRetries)
-          await new Promise(resolve => setTimeout(resolve, retryDelayMs));
-        continue;
+      const pendingByFeedHash = new Map<string, AggregatorData[]>();
+      for (const aggregator of pendingAggregators) {
+        const feedHash = normalizeHex(aggregator.feedHash);
+        const matchingAggregators = pendingByFeedHash.get(feedHash) ?? [];
+        matchingAggregators.push(aggregator);
+        pendingByFeedHash.set(feedHash, matchingAggregators);
       }
 
-      failures.push(...updateResult.failures);
+      const uniqueFeedHashAggregators: AggregatorData[] = [];
+      const requestGroups: AggregatorData[][] = [];
+      for (const matchingAggregators of Array.from(
+        pendingByFeedHash.values()
+      )) {
+        if (matchingAggregators.length === 1) {
+          uniqueFeedHashAggregators.push(matchingAggregators[0]);
+        } else {
+          requestGroups.push(
+            ...matchingAggregators.map(aggregator => [aggregator])
+          );
+        }
+      }
+      if (uniqueFeedHashAggregators.length > 0) {
+        requestGroups.unshift(uniqueFeedHashAggregators);
+      }
 
-      const candidates = updateResult.responses.flatMap(response =>
+      const updateResults = await Promise.all(
+        requestGroups.map(async requestAggregators => {
+          try {
+            const result = await this.fetchUpdateForMultiple(
+              mainnet ? 'mainnet' : 'testnet',
+              requestAggregators.map(aggregator => aggregator.id),
+              { ...options, maxRetries: 0, minResponsesRequired: 1 }
+            );
+            return { requestAggregators, result };
+          } catch {
+            return { requestAggregators, result: null };
+          }
+        })
+      );
+
+      const pairedResponses: Array<{
+        aggregatorId: string;
+        response: FetchUpdateResponse;
+      }> = [];
+      for (const { requestAggregators, result } of updateResults) {
+        if (!result) {
+          failures.push(
+            `Crossbar request failed for aggregators: ${requestAggregators
+              .map(aggregator => aggregator.id)
+              .join(', ')}`
+          );
+          continue;
+        }
+
+        failures.push(...result.failures);
+        for (const response of result.responses) {
+          const responseFeedHash = normalizeHex(response.feedConfigs.feedHash);
+          const matchingAggregators = requestAggregators.filter(
+            aggregator => normalizeHex(aggregator.feedHash) === responseFeedHash
+          );
+          if (matchingAggregators.length !== 1) {
+            failures.push(
+              `Unexpected feed hash ${response.feedConfigs.feedHash}`
+            );
+            continue;
+          }
+          pairedResponses.push({
+            aggregatorId: matchingAggregators[0].id,
+            response,
+          });
+        }
+      }
+
+      const candidates = pairedResponses.flatMap(({ response }) =>
         response.results
           .filter(result => result.signature !== '00' && result.successValue)
           .map(result => ({ response, result }))
@@ -759,16 +824,18 @@ export class Aggregator {
         new Set(candidates.map(({ result }) => result.oracleId))
       );
 
-      const queueData = await new Queue(
-        switchboardClient,
-        oracleQueueId
-      ).loadData();
-      const currentOracleIds = new Set(
-        queueData.existingOracles.map(({ oracleId }) =>
-          normalizeSuiObjectId(oracleId)
-        )
-      );
+      const currentOracleIds = new Set<string>();
       const oracleValidation = new Map<string, string | null>();
+
+      if (candidateOracleIds.length > 0) {
+        const queueData = await new Queue(
+          switchboardClient,
+          oracleQueueId
+        ).loadData();
+        for (const { oracleId } of queueData.existingOracles) {
+          currentOracleIds.add(normalizeSuiObjectId(oracleId));
+        }
+      }
 
       await Promise.all(
         candidateOracleIds.map(async oracleId => {
@@ -803,16 +870,8 @@ export class Aggregator {
         })
       );
 
-      for (const response of updateResult.responses) {
-        const feedHash = normalizeHex(response.feedConfigs.feedHash);
-        if (!feedHashToAggregatorId.has(feedHash)) {
-          failures.push(
-            `Unexpected feed hash ${response.feedConfigs.feedHash}`
-          );
-          continue;
-        }
-
-        const seen = acceptedOracleIds.get(feedHash) ?? new Set<string>();
+      for (const { aggregatorId, response } of pairedResponses) {
+        const seen = acceptedOracleIds.get(aggregatorId) ?? new Set<string>();
         const validResults = response.results.filter(result => {
           if (result.signature === '00' || !result.successValue) return false;
           const reason = oracleValidation.get(result.oracleId);
@@ -826,15 +885,18 @@ export class Aggregator {
           return true;
         });
 
-        acceptedOracleIds.set(feedHash, seen);
+        acceptedOracleIds.set(aggregatorId, seen);
         if (validResults.length > 0)
-          acceptedResponses.push({ ...response, results: validResults });
+          acceptedResponses.push({
+            aggregatorId,
+            response: { ...response, results: validResults },
+          });
       }
 
       if (attempt < maxRetries) {
         const stillPending = Array.from(requiredResponses).some(
-          ([feedHash, required]) =>
-            (acceptedOracleIds.get(feedHash)?.size ?? 0) < required
+          ([aggregatorId, required]) =>
+            (acceptedOracleIds.get(aggregatorId)?.size ?? 0) < required
         );
         if (stillPending)
           await new Promise(resolve => setTimeout(resolve, retryDelayMs));
@@ -842,9 +904,9 @@ export class Aggregator {
     }
 
     const insufficient = Array.from(requiredResponses)
-      .map(([feedHash, required]) => ({
-        aggregatorId: feedHashToAggregatorId.get(feedHash)!,
-        received: acceptedOracleIds.get(feedHash)?.size ?? 0,
+      .map(([aggregatorId, required]) => ({
+        aggregatorId,
+        received: acceptedOracleIds.get(aggregatorId)?.size ?? 0,
         required,
       }))
       .filter(({ received, required }) => received < required);
@@ -860,23 +922,14 @@ export class Aggregator {
       );
     }
 
-    const feeAmounts = acceptedResponses.flatMap(response =>
+    const feeAmounts = acceptedResponses.flatMap(({ response }) =>
       response.results.map(() => response.fee)
     );
     const coins = tx.splitCoins(tx.gas, feeAmounts);
     let coinIdx = 0;
 
-    for (const response of acceptedResponses) {
+    for (const { aggregatorId, response } of acceptedResponses) {
       for (const result of response.results) {
-        const aggregatorId = feedHashToAggregatorId.get(
-          normalizeHex(response.feedConfigs.feedHash)
-        );
-        if (!aggregatorId) {
-          throw new Error(
-            `Aggregator ID not found for feed hash: ${response.feedConfigs.feedHash}`
-          );
-        }
-
         // write the move call
         tx.moveCall({
           target: `${switchboardAddress}::aggregator_submit_result_action::run`,
@@ -896,7 +949,10 @@ export class Aggregator {
       }
     }
 
-    return { responses: acceptedResponses, failures };
+    return {
+      responses: acceptedResponses.map(({ response }) => response),
+      failures,
+    };
   }
 
   /**
