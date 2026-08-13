@@ -72,13 +72,13 @@ fn optional_anchor_dependency_stays_on_the_compatible_0_31_line() {
 }
 
 #[test]
-fn switchboard_protos_dependency_stays_on_the_compatible_0_2_line() {
+fn switchboard_protos_dependency_requires_the_pyth_schema_floor() {
     let manifest = include_str!("../Cargo.toml");
     let line = dependency_line(manifest, "switchboard-protos");
 
     assert!(
-        line.contains("\">=0.2.3, <0.3\""),
-        "switchboard-protos must stay bounded to the compatible 0.2 line; got `{}`",
+        line.contains("version = \">=0.2.7, <0.3\""),
+        "switchboard-protos must require the Pyth push/API-key schema while staying below 0.3; got `{}`",
         line
     );
 }

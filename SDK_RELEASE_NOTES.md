@@ -8,6 +8,45 @@ The newest release batch should stay at the top.
 - Follow `SDK_RELEASE_FLOW.md`; release from canonical `sbv3`, not from the `switchboard-sdk` mirror.
 - Before publishing, confirm each release-note version matches the canonical `sbv3` manifest version, the final `switchboard-sdk` release-branch manifest version, and the latest published registry version.
 
+## 2026-08-11 Rust Pyth SDK Release Prep
+
+### `switchboard-protos@0.2.7`
+
+Status: prepared.
+
+- Publishes the Pyth push-feed task fields and legacy Pyth Core API-key configuration already present in the canonical schema.
+- Extends the shared Rust/JavaScript conformance fixture to cover the request-scoped `${PYTH_API_KEY}` placeholder without changing the legacy control identity.
+
+### `switchboard-on-demand-client@0.6.1`
+
+Status: prepared.
+
+- Requires `switchboard-protos` 0.2.7 or newer on the compatible 0.2 line so Pyth fields cannot be discarded during decode and re-encode.
+- Adds request-scoped variable overrides to Crossbar simulation, every gateway signature route, and classic PullFeed update helpers while preserving existing method signatures.
+- Redacts override values from Crossbar and gateway error/log text exposed to callers without mutating results, feed hashes, or signatures.
+- Pins the legacy client crate to the Solana 1.18 SDK line it supports and fixes compatibility with its module paths.
+- Preserves exact on-chain `max_variance` values and rejects malformed or identity-mismatched gateway responses before instruction construction.
+
+### `switchboard-on-demand@0.13.1`
+
+Status: prepared.
+
+- Requires `switchboard-protos` 0.2.7 or newer on the compatible 0.2 line.
+- Adds the same backward-compatible request-scoped override APIs as the legacy client crate for Solana 2.x and 3.x consumers.
+- Keeps the Solana 2.x support floor at 2.1 and the Solana 3.x support ceiling below 4.x.
+- Preserves exact on-chain `max_variance` values, rejects malformed or identity-mismatched gateway responses, and safely decodes unaligned classic PullFeed accounts.
+
+### `sb-on-demand-schemas@0.1.4`
+
+Status: prepared.
+
+- Requires `switchboard-protos` 0.2.7 or newer and preserves Pyth push/API-key fields across V1 job and V2 feed decoding.
+- Aligns its Solana bounds with the supported `switchboard-on-demand` 0.13 release line.
+
+Publish in dependency order: `switchboard-protos@0.2.7`,
+`switchboard-on-demand-client@0.6.1`, `switchboard-on-demand@0.13.1`, then
+`sb-on-demand-schemas@0.1.4`.
+
 ## 2026-08-07 Release Prep
 
 ### `@switchboard-xyz/sui-sdk@0.1.17`
@@ -88,34 +127,6 @@ Status: prepared; package dry-run blocked by the existing CLI lint baseline.
 
 - Uses the Subscriber State feed for subscription oracle updates.
 - Adds a cluster-aware, authority-checked SWTCH feed migration command.
-
-## 2026-06-27 Release Prep
-
-### `switchboard-on-demand-client@0.6.1`
-
-Status: prepared; dry-run verified.
-
-- Pins the legacy client crate to the Solana 1.18 SDK line it supports.
-- Fixes compatibility with Solana SDK module paths used by 1.18-era consumers.
-- Sends the exact on-chain `max_variance` integer through classic PullFeed gateway requests instead of truncating it to a whole percentage.
-- Rejects unexpected response hashes, malformed signatures, and malformed gateway payloads before constructing update instructions.
-
-### `switchboard-on-demand@0.13.1`
-
-Status: prepared; dry-run verified.
-
-- Sets the Solana 2.x support floor to 2.1 and keeps Solana 3.x support below 4.x.
-- Fixes Solana 3 client feature compilation, including lookup-table message types and shared client dependencies.
-- Sends the exact on-chain `max_variance` integer through classic PullFeed gateway requests instead of truncating it to a whole percentage.
-- Rejects unexpected response hashes, malformed signatures, and malformed gateway payloads before constructing update instructions.
-- Decodes legacy PullFeed accounts with unaligned-safe reads and returns a clean parse error for malformed account sizes.
-
-### `sb-on-demand-schemas@0.1.4`
-
-Status: prepared; dry-run pending.
-
-- Aligns schema crate Solana 2.x bounds with the supported 2.1+ SDK range.
-- Keeps the schema crate on the compatible `switchboard-on-demand` 0.13 release line.
 
 ## 2026-06-08 Release Prep
 

@@ -3,6 +3,7 @@ use prost::Message;
 use reqwest::header::CONTENT_TYPE;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use switchboard_protos::OracleJob;
@@ -183,6 +184,103 @@ pub struct BridgeEnclaveResponse {
     pub recovery_id: i32,
 }
 
+fn insert_variable_overrides(
+    body: &mut serde_json::Value,
+    variable_overrides: Option<&HashMap<String, String>>,
+) {
+    if let Some(variable_overrides) = variable_overrides {
+        body.as_object_mut()
+            .expect("gateway request body must be a JSON object")
+            .insert(
+                "variable_overrides".to_string(),
+                serde_json::json!(variable_overrides),
+            );
+    }
+}
+
+fn redact_text(text: &mut String, variable_overrides: &HashMap<String, String>) {
+    let mut values: Vec<&str> = variable_overrides
+        .values()
+        .map(String::as_str)
+        .filter(|value| !value.is_empty())
+        .collect();
+    values.sort_unstable_by_key(|value| std::cmp::Reverse(value.len()));
+    for value in values {
+        *text = text.replace(value, "[REDACTED]");
+    }
+}
+
+fn redact_optional_texts(
+    texts: &mut [Option<String>],
+    variable_overrides: &HashMap<String, String>,
+) {
+    for text in texts.iter_mut().flatten() {
+        redact_text(text, variable_overrides);
+    }
+}
+
+fn redact_feed_eval_response(
+    response: &mut FeedEvalResponse,
+    variable_overrides: &HashMap<String, String>,
+) {
+    redact_text(&mut response.failure_error, variable_overrides);
+    for nested in &mut response.recent_successes_if_failed {
+        redact_feed_eval_response(nested, variable_overrides);
+    }
+}
+
+fn redact_single_response(
+    response: &mut FeedEvalResponseSingle,
+    variable_overrides: &HashMap<String, String>,
+) {
+    for response in &mut response.responses {
+        redact_feed_eval_response(response, variable_overrides);
+    }
+    for failure in &mut response.failures {
+        redact_text(failure, variable_overrides);
+    }
+}
+
+fn redact_multi_response(
+    response: &mut FetchSignaturesMultiResponse,
+    variable_overrides: &HashMap<String, String>,
+) {
+    for oracle_response in &mut response.oracle_responses {
+        for feed_response in &mut oracle_response.feed_responses {
+            redact_feed_eval_response(feed_response, variable_overrides);
+        }
+        redact_optional_texts(&mut oracle_response.errors, variable_overrides);
+    }
+    redact_optional_texts(&mut response.errors, variable_overrides);
+}
+
+fn redact_batch_response(
+    response: &mut FetchSignaturesBatchResponse,
+    variable_overrides: &HashMap<String, String>,
+) {
+    for oracle_response in &mut response.oracle_responses {
+        for feed_response in &mut oracle_response.feed_responses {
+            redact_feed_eval_response(feed_response, variable_overrides);
+        }
+        redact_optional_texts(&mut oracle_response.errors, variable_overrides);
+    }
+    for error in &mut response.errors {
+        redact_text(error, variable_overrides);
+    }
+}
+
+fn redact_consensus_response(
+    response: &mut FetchSignaturesConsensusResponse,
+    variable_overrides: &HashMap<String, String>,
+) {
+    for oracle_response in &mut response.oracle_responses {
+        for feed_response in &mut oracle_response.feed_responses {
+            redact_feed_eval_response(feed_response, variable_overrides);
+        }
+        redact_optional_texts(&mut oracle_response.errors, variable_overrides);
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct Gateway {
     gateway_url: String,
@@ -230,12 +328,50 @@ impl Gateway {
         .await
     }
 
+    /// Fetches signatures while forwarding request-scoped task variable overrides.
+    pub async fn fetch_signatures_from_encoded_with_variable_overrides(
+        &self,
+        params: FetchSignaturesParams,
+        variable_overrides: HashMap<String, String>,
+    ) -> Result<FeedEvalResponseSingle, reqwest::Error> {
+        self.fetch_signatures_from_encoded_scaled_with_variable_overrides(
+            FetchSignaturesScaledParams {
+                recent_hash: params.recent_hash,
+                encoded_jobs: params.encoded_jobs,
+                num_signatures: params.num_signatures,
+                max_variance_scaled: scale_human_max_variance(params.max_variance),
+                min_responses: params.min_responses,
+                use_timestamp: params.use_timestamp,
+            },
+            &variable_overrides,
+        )
+        .await
+    }
+
     pub(crate) async fn fetch_signatures_from_encoded_scaled(
         &self,
         params: FetchSignaturesScaledParams,
     ) -> Result<FeedEvalResponseSingle, reqwest::Error> {
+        self.fetch_signatures_from_encoded_scaled_inner(params, None)
+            .await
+    }
+
+    pub(crate) async fn fetch_signatures_from_encoded_scaled_with_variable_overrides(
+        &self,
+        params: FetchSignaturesScaledParams,
+        variable_overrides: &HashMap<String, String>,
+    ) -> Result<FeedEvalResponseSingle, reqwest::Error> {
+        self.fetch_signatures_from_encoded_scaled_inner(params, Some(variable_overrides))
+            .await
+    }
+
+    async fn fetch_signatures_from_encoded_scaled_inner(
+        &self,
+        params: FetchSignaturesScaledParams,
+        variable_overrides: Option<&HashMap<String, String>>,
+    ) -> Result<FeedEvalResponseSingle, reqwest::Error> {
         let url = format!("{}/gateway/api/v1/fetch_signatures", self.gateway_url);
-        let body = serde_json::json!({
+        let mut body = serde_json::json!({
             "api_version": "1.0.0",
             "jobs_b64_encoded": params.encoded_jobs,
             "recent_chainhash": params.recent_hash.unwrap_or_else(|| bs58::encode(vec![0; 32]).into_string()),
@@ -246,6 +382,7 @@ impl Gateway {
             "min_responses": params.min_responses.unwrap_or(1),
             "use_timestamp": params.use_timestamp.unwrap_or(false),
         });
+        insert_variable_overrides(&mut body, variable_overrides);
 
         let res = self
             .client
@@ -256,7 +393,11 @@ impl Gateway {
             .await?
             .error_for_status()?;
 
-        res.json::<FeedEvalResponseSingle>().await
+        let mut response = res.json::<FeedEvalResponseSingle>().await?;
+        if let Some(variable_overrides) = variable_overrides {
+            redact_single_response(&mut response, variable_overrides);
+        }
+        Ok(response)
     }
 
     /// Fetches signatures from the gateway using the multi-feed method
@@ -272,6 +413,24 @@ impl Gateway {
         &self,
         params: FetchSignaturesMultiParams,
     ) -> Result<FetchSignaturesMultiResponse, reqwest::Error> {
+        self.fetch_signatures_multi_inner(params, None).await
+    }
+
+    /// Fetches multi-feed signatures with request-scoped task variable overrides.
+    pub async fn fetch_signatures_multi_with_variable_overrides(
+        &self,
+        params: FetchSignaturesMultiParams,
+        variable_overrides: HashMap<String, String>,
+    ) -> Result<FetchSignaturesMultiResponse, reqwest::Error> {
+        self.fetch_signatures_multi_inner(params, Some(&variable_overrides))
+            .await
+    }
+
+    async fn fetch_signatures_multi_inner(
+        &self,
+        params: FetchSignaturesMultiParams,
+        variable_overrides: Option<&HashMap<String, String>>,
+    ) -> Result<FetchSignaturesMultiResponse, reqwest::Error> {
         let url = format!("{}/gateway/api/v1/fetch_signatures_multi", self.gateway_url);
         let mut feed_requests = vec![];
 
@@ -284,7 +443,7 @@ impl Gateway {
             }));
         }
 
-        let body = serde_json::json!({
+        let mut body = serde_json::json!({
             "api_version": "1.0.0",
             "num_oracles": params.num_signatures.unwrap_or(1),
             "recent_hash": params.recent_hash.unwrap_or_else(|| bs58::encode(vec![0; 32]).into_string()),
@@ -292,6 +451,7 @@ impl Gateway {
             "hash_scheme": "Sha256",
             "feed_requests": feed_requests,
         });
+        insert_variable_overrides(&mut body, variable_overrides);
 
         let res = self
             .client
@@ -301,7 +461,10 @@ impl Gateway {
             .send()
             .await?
             .error_for_status()?;
-        let res = res.json::<FetchSignaturesMultiResponse>().await?;
+        let mut res = res.json::<FetchSignaturesMultiResponse>().await?;
+        if let Some(variable_overrides) = variable_overrides {
+            redact_multi_response(&mut res, variable_overrides);
+        }
 
         Ok(res)
     }
@@ -309,6 +472,24 @@ impl Gateway {
     pub async fn fetch_signatures_batch(
         &self,
         params: FetchSignaturesBatchParams,
+    ) -> Result<FetchSignaturesBatchResponse, reqwest::Error> {
+        self.fetch_signatures_batch_inner(params, None).await
+    }
+
+    /// Fetches batched signatures with request-scoped task variable overrides.
+    pub async fn fetch_signatures_batch_with_variable_overrides(
+        &self,
+        params: FetchSignaturesBatchParams,
+        variable_overrides: HashMap<String, String>,
+    ) -> Result<FetchSignaturesBatchResponse, reqwest::Error> {
+        self.fetch_signatures_batch_inner(params, Some(&variable_overrides))
+            .await
+    }
+
+    async fn fetch_signatures_batch_inner(
+        &self,
+        params: FetchSignaturesBatchParams,
+        variable_overrides: Option<&HashMap<String, String>>,
     ) -> Result<FetchSignaturesBatchResponse, reqwest::Error> {
         let url = format!("{}/gateway/api/v1/fetch_signatures_batch", self.gateway_url);
         let req = FetchSignaturesBatchRequest {
@@ -323,17 +504,23 @@ impl Gateway {
             num_oracles: params.num_signatures.unwrap_or(1),
             use_timestamp: params.use_timestamp.unwrap_or(false),
         };
+        let mut body =
+            serde_json::to_value(&req).expect("gateway batch request must be serializable");
+        insert_variable_overrides(&mut body, variable_overrides);
 
         let res = self
             .client
             .post(&url)
             .header(CONTENT_TYPE, "application/json")
-            .json(&req)
+            .json(&body)
             .send()
             .await?
             .error_for_status()?;
 
-        let response = res.json::<FetchSignaturesBatchResponse>().await?;
+        let mut response = res.json::<FetchSignaturesBatchResponse>().await?;
+        if let Some(variable_overrides) = variable_overrides {
+            redact_batch_response(&mut response, variable_overrides);
+        }
         Ok(response)
     }
 
@@ -360,9 +547,55 @@ impl Gateway {
         .await
     }
 
+    /// Fetches consensus signatures with request-scoped task variable overrides.
+    pub async fn fetch_signatures_consensus_with_variable_overrides(
+        &self,
+        params: FetchSignaturesConsensusParams,
+        variable_overrides: HashMap<String, String>,
+    ) -> Result<FetchSignaturesConsensusResponse, reqwest::Error> {
+        let feed_configs = params
+            .feed_configs
+            .into_iter()
+            .map(|config| BatchFeedRequest {
+                jobs_b64_encoded: config.encoded_jobs,
+                max_variance: scale_human_max_variance(config.max_variance),
+                min_responses: config.min_responses.unwrap_or(1),
+            })
+            .collect();
+
+        self.fetch_signatures_consensus_scaled_with_variable_overrides(
+            FetchSignaturesConsensusScaledParams {
+                recent_hash: params.recent_hash,
+                feed_configs,
+                use_timestamp: params.use_timestamp,
+                num_signatures: params.num_signatures,
+            },
+            &variable_overrides,
+        )
+        .await
+    }
+
     pub(crate) async fn fetch_signatures_consensus_scaled(
         &self,
         params: FetchSignaturesConsensusScaledParams,
+    ) -> Result<FetchSignaturesConsensusResponse, reqwest::Error> {
+        self.fetch_signatures_consensus_scaled_inner(params, None)
+            .await
+    }
+
+    pub(crate) async fn fetch_signatures_consensus_scaled_with_variable_overrides(
+        &self,
+        params: FetchSignaturesConsensusScaledParams,
+        variable_overrides: &HashMap<String, String>,
+    ) -> Result<FetchSignaturesConsensusResponse, reqwest::Error> {
+        self.fetch_signatures_consensus_scaled_inner(params, Some(variable_overrides))
+            .await
+    }
+
+    async fn fetch_signatures_consensus_scaled_inner(
+        &self,
+        params: FetchSignaturesConsensusScaledParams,
+        variable_overrides: Option<&HashMap<String, String>>,
     ) -> Result<FetchSignaturesConsensusResponse, reqwest::Error> {
         let url = format!(
             "{}/gateway/api/v1/fetch_signatures_consensus",
@@ -382,7 +615,7 @@ impl Gateway {
             })
             .collect();
 
-        let body = serde_json::json!({
+        let mut body = serde_json::json!({
             "api_version": "1.0.0",
             "recent_hash": params.recent_hash.unwrap_or_else(|| bs58::encode(vec![0; 32]).into_string()),
             "signature_scheme": "Secp256k1",
@@ -390,6 +623,7 @@ impl Gateway {
             "feed_requests": feed_requests,
             "num_oracles": params.num_signatures.unwrap_or(1)
         });
+        insert_variable_overrides(&mut body, variable_overrides);
 
         let res = self
             .client
@@ -400,7 +634,10 @@ impl Gateway {
             .await?
             .error_for_status()?;
 
-        let response = res.json::<FetchSignaturesConsensusResponse>().await?;
+        let mut response = res.json::<FetchSignaturesConsensusResponse>().await?;
+        if let Some(variable_overrides) = variable_overrides {
+            redact_consensus_response(&mut response, variable_overrides);
+        }
         Ok(response)
     }
 
@@ -487,8 +724,9 @@ mod tests {
 
     async fn capture_request(
         status: &'static str,
-        response_body: &'static str,
+        response_body: impl Into<String>,
     ) -> (String, oneshot::Receiver<Value>) {
+        let response_body = response_body.into();
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let (sender, receiver) = oneshot::channel();
@@ -635,5 +873,289 @@ mod tests {
             })
             .await
             .is_err());
+    }
+
+    fn signature_params() -> FetchSignaturesParams {
+        FetchSignaturesParams {
+            recent_hash: Some("recent".to_string()),
+            encoded_jobs: vec!["job".to_string()],
+            num_signatures: 1,
+            max_variance: Some(1),
+            min_responses: Some(1),
+            use_timestamp: Some(false),
+        }
+    }
+
+    fn multi_params() -> FetchSignaturesMultiParams {
+        FetchSignaturesMultiParams {
+            recent_hash: Some("recent".to_string()),
+            feed_configs: vec![FeedConfig {
+                encoded_jobs: vec!["job".to_string()],
+                max_variance: Some(1),
+                min_responses: Some(1),
+            }],
+            num_signatures: Some(1),
+            use_timestamp: Some(false),
+        }
+    }
+
+    fn batch_params() -> FetchSignaturesBatchParams {
+        FetchSignaturesBatchParams {
+            recent_hash: Some("recent".to_string()),
+            feed_configs: vec![BatchFeedRequest {
+                jobs_b64_encoded: vec!["job".to_string()],
+                max_variance: 1_000_000_000,
+                min_responses: 1,
+            }],
+            num_signatures: Some(1),
+            use_timestamp: Some(false),
+        }
+    }
+
+    fn consensus_params() -> FetchSignaturesConsensusParams {
+        FetchSignaturesConsensusParams {
+            recent_hash: Some("recent".to_string()),
+            feed_configs: vec![FeedConfig {
+                encoded_jobs: vec!["job".to_string()],
+                max_variance: Some(1),
+                min_responses: Some(1),
+            }],
+            use_timestamp: Some(false),
+            num_signatures: Some(1),
+        }
+    }
+
+    fn diagnostic_feed_response(secret: &str) -> Value {
+        serde_json::json!({
+            "oracle_pubkey": secret,
+            "queue_pubkey": secret,
+            "oracle_signing_pubkey": secret,
+            "feed_hash": secret,
+            "recent_hash": secret,
+            "failure_error": secret,
+            "success_value": secret,
+            "msg": secret,
+            "signature": secret,
+            "recovery_id": 0,
+            "recent_successes_if_failed": []
+        })
+    }
+
+    #[tokio::test]
+    async fn variable_override_routes_redact_errors_without_mutating_results() {
+        let secret = "request-scoped-pyth-secret";
+        let overrides = HashMap::from([
+            ("PYTH_API_KEY".to_string(), secret.to_string()),
+            ("EMPTY".to_string(), String::new()),
+        ]);
+
+        let (url, request) = capture_request(
+            "200 OK",
+            r#"{"responses":[{"oracle_pubkey":"request-scoped-pyth-secret","queue_pubkey":"request-scoped-pyth-secret","oracle_signing_pubkey":"request-scoped-pyth-secret","feed_hash":"request-scoped-pyth-secret","recent_hash":"request-scoped-pyth-secret","failure_error":"request-scoped-pyth-secret","success_value":"request-scoped-pyth-secret","msg":"request-scoped-pyth-secret","signature":"request-scoped-pyth-secret","recovery_id":0,"recent_successes_if_failed":[]}],"caller":"request-scoped-pyth-secret","failures":["request-scoped-pyth-secret"]}"#,
+        )
+        .await;
+        let response = Gateway::new(url)
+            .fetch_signatures_from_encoded_with_variable_overrides(
+                signature_params(),
+                overrides.clone(),
+            )
+            .await
+            .unwrap();
+        let request = request.await.unwrap();
+        assert_eq!(request["variable_overrides"]["PYTH_API_KEY"], secret);
+        assert!(request.get("variableOverrides").is_none());
+        assert_eq!(response.caller, secret);
+        assert_eq!(response.responses[0].oracle_pubkey, secret);
+        assert_eq!(response.responses[0].queue_pubkey, secret);
+        assert_eq!(response.responses[0].oracle_signing_pubkey, secret);
+        assert_eq!(response.responses[0].feed_hash, secret);
+        assert_eq!(response.responses[0].recent_hash, secret);
+        assert_eq!(response.responses[0].success_value, secret);
+        assert_eq!(response.responses[0].msg, secret);
+        assert_eq!(response.responses[0].signature, secret);
+        assert!(!response.responses[0].failure_error.contains(secret));
+        assert!(response
+            .failures
+            .iter()
+            .all(|failure| !failure.contains(secret)));
+
+        let (url, request) = capture_request(
+            "200 OK",
+            serde_json::json!({
+                "oracle_responses": [{
+                    "feed_responses": [diagnostic_feed_response(secret)],
+                    "signature": secret,
+                    "recovery_id": 0,
+                    "errors": [secret]
+                }],
+                "errors": [secret]
+            })
+            .to_string(),
+        )
+        .await;
+        let response = Gateway::new(url)
+            .fetch_signatures_multi_with_variable_overrides(multi_params(), overrides.clone())
+            .await
+            .unwrap();
+        let request = request.await.unwrap();
+        assert_eq!(request["variable_overrides"]["PYTH_API_KEY"], secret);
+        assert!(request.get("variableOverrides").is_none());
+        assert!(response
+            .errors
+            .iter()
+            .flatten()
+            .all(|error| !error.contains(secret)));
+        assert_eq!(response.oracle_responses[0].signature, secret);
+        assert!(response.oracle_responses[0]
+            .errors
+            .iter()
+            .flatten()
+            .all(|error| !error.contains(secret)));
+        assert!(!response.oracle_responses[0].feed_responses[0]
+            .failure_error
+            .contains(secret));
+        assert_eq!(
+            response.oracle_responses[0].feed_responses[0].success_value,
+            secret
+        );
+
+        let (url, request) = capture_request(
+            "200 OK",
+            serde_json::json!({
+                "oracle_responses": [{
+                    "feed_responses": [diagnostic_feed_response(secret)],
+                    "errors": [secret]
+                }],
+                "errors": [secret]
+            })
+            .to_string(),
+        )
+        .await;
+        let response = Gateway::new(url)
+            .fetch_signatures_batch_with_variable_overrides(batch_params(), overrides.clone())
+            .await
+            .unwrap();
+        let request = request.await.unwrap();
+        assert_eq!(request["variable_overrides"]["PYTH_API_KEY"], secret);
+        assert!(request.get("variableOverrides").is_none());
+        assert!(response.errors.iter().all(|error| !error.contains(secret)));
+        assert!(response.oracle_responses[0]
+            .errors
+            .iter()
+            .flatten()
+            .all(|error| !error.contains(secret)));
+        assert!(!response.oracle_responses[0].feed_responses[0]
+            .failure_error
+            .contains(secret));
+        assert_eq!(
+            response.oracle_responses[0].feed_responses[0].signature,
+            secret
+        );
+
+        let (url, request) = capture_request(
+            "200 OK",
+            serde_json::json!({
+                "median_responses": [{"value": secret, "feed_hash": "hash"}],
+                "oracle_responses": [{
+                    "oracle_pubkey": secret,
+                    "eth_address": secret,
+                    "signature": secret,
+                    "checksum": secret,
+                    "recovery_id": 0,
+                    "feed_responses": [diagnostic_feed_response(secret)],
+                    "errors": [secret]
+                }]
+            })
+            .to_string(),
+        )
+        .await;
+        let response = Gateway::new(url)
+            .fetch_signatures_consensus_with_variable_overrides(consensus_params(), overrides)
+            .await
+            .unwrap();
+        let request = request.await.unwrap();
+        assert_eq!(request["variable_overrides"]["PYTH_API_KEY"], secret);
+        assert!(request.get("variableOverrides").is_none());
+        assert_eq!(response.median_responses[0].value, secret);
+        assert_eq!(response.oracle_responses[0].signature, secret);
+        assert_eq!(response.oracle_responses[0].checksum, secret);
+        assert!(response.oracle_responses[0]
+            .errors
+            .iter()
+            .flatten()
+            .all(|error| !error.contains(secret)));
+        assert!(!response.oracle_responses[0].feed_responses[0]
+            .failure_error
+            .contains(secret));
+    }
+
+    #[tokio::test]
+    async fn variable_override_http_errors_do_not_echo_response_secrets() {
+        let secret = "request-scoped-pyth-secret";
+        let (url, _request) = capture_request(
+            "500 Internal Server Error",
+            r#"{"error":"request-scoped-pyth-secret"}"#,
+        )
+        .await;
+
+        let error = Gateway::new(url)
+            .fetch_signatures_from_encoded_with_variable_overrides(
+                signature_params(),
+                HashMap::from([("PYTH_API_KEY".to_string(), secret.to_string())]),
+            )
+            .await
+            .unwrap_err();
+
+        assert_eq!(
+            error.status(),
+            Some(reqwest::StatusCode::INTERNAL_SERVER_ERROR)
+        );
+        assert!(!error.to_string().contains(secret));
+    }
+
+    #[tokio::test]
+    async fn legacy_gateway_routes_omit_variable_overrides() {
+        let (url, request) = capture_request(
+            "200 OK",
+            r#"{"responses":[],"caller":"test","failures":[]}"#,
+        )
+        .await;
+        Gateway::new(url)
+            .fetch_signatures_from_encoded(signature_params())
+            .await
+            .unwrap();
+        let request = request.await.unwrap();
+        assert!(request.get("variable_overrides").is_none());
+        assert!(request.get("variableOverrides").is_none());
+
+        let (url, request) =
+            capture_request("200 OK", r#"{"oracle_responses":[],"errors":[]}"#).await;
+        Gateway::new(url)
+            .fetch_signatures_multi(multi_params())
+            .await
+            .unwrap();
+        let request = request.await.unwrap();
+        assert!(request.get("variable_overrides").is_none());
+        assert!(request.get("variableOverrides").is_none());
+
+        let (url, request) =
+            capture_request("200 OK", r#"{"oracle_responses":[],"errors":[]}"#).await;
+        Gateway::new(url)
+            .fetch_signatures_batch(batch_params())
+            .await
+            .unwrap();
+        let request = request.await.unwrap();
+        assert!(request.get("variable_overrides").is_none());
+        assert!(request.get("variableOverrides").is_none());
+
+        let (url, request) =
+            capture_request("200 OK", r#"{"median_responses":[],"oracle_responses":[]}"#).await;
+        Gateway::new(url)
+            .fetch_signatures_consensus(consensus_params())
+            .await
+            .unwrap();
+        let request = request.await.unwrap();
+        assert!(request.get("variable_overrides").is_none());
+        assert!(request.get("variableOverrides").is_none());
     }
 }

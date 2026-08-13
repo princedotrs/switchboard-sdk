@@ -2,6 +2,43 @@
 
 This crate is designed to interact with Switchboard on-demand, the Crossbar service, and queue gateways.
 
+## Installation
+
+```toml
+[dependencies]
+switchboard-on-demand-client = "0.6.1"
+```
+
+## Request-scoped task variables
+
+Keep API keys and other credentials out of stored `OracleJob` definitions. Put a
+placeholder such as `${PYTH_API_KEY}` in the job, then supply its value only for
+the request that needs it:
+
+```rust
+use std::collections::HashMap;
+
+let pyth_api_key = std::env::var("PYTH_API_KEY")?;
+let overrides = HashMap::from([(
+    "PYTH_API_KEY".to_string(),
+    pyth_api_key,
+)]);
+
+let simulation = crossbar
+    .simulate_proto_with_variable_overrides(
+        &oracle_feed,
+        true,
+        Some("mainnet"),
+        overrides,
+    )
+    .await?;
+```
+
+The same override map is accepted by the `_with_variable_overrides` gateway
+signature helpers and by `PullFeed::fetch_update_ix_with_variable_overrides`
+and `PullFeed::fetch_update_consensus_ix_with_variable_overrides`. Existing
+methods remain available for requests that do not need overrides.
+
 ## Crossbar
 A middleman service to fetch oracle jobs from IPFS and to return feed price simulations. This is useful for updating a price constantly instead of sending requests directly to oracles.
 
