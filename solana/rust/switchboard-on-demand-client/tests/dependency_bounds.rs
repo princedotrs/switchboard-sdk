@@ -33,3 +33,15 @@ fn tokio_stream_dependency_stays_on_the_compatible_0_1_line() {
         line
     );
 }
+
+#[test]
+fn switchboard_protos_dependency_requires_the_pyth_schema_floor() {
+    let manifest = include_str!("../Cargo.toml");
+    let line = dependency_line(manifest, "protos");
+
+    assert!(
+        line.contains("version = \">=0.2.7, <0.3\""),
+        "switchboard-protos must require the Pyth push/API-key schema while staying below 0.3; got `{}`",
+        line
+    );
+}

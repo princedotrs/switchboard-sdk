@@ -27,6 +27,7 @@ use dashmap::DashMap;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 use std::result::Result;
 use std::sync::Arc;
 use switchboard_protos::OracleJob;
@@ -115,6 +116,20 @@ pub struct OracleResponse {
 fn has_failure_error(error: &str) -> bool {
     let trimmed = error.trim();
     !trimmed.is_empty() && trimmed != "[]"
+}
+
+fn redact_override_values(text: &str, variable_overrides: &HashMap<String, String>) -> String {
+    let mut redacted = text.to_string();
+    let mut values: Vec<&str> = variable_overrides
+        .values()
+        .map(String::as_str)
+        .filter(|value| !value.is_empty())
+        .collect();
+    values.sort_unstable_by_key(|value| std::cmp::Reverse(value.len()));
+    for value in values {
+        redacted = redacted.replace(value, "[REDACTED]");
+    }
+    redacted
 }
 
 fn decode_fixed_hex<const N: usize>(value: &str, field: &str) -> Result<[u8; N], AnyhowError> {
@@ -445,6 +460,52 @@ impl PullFeed {
         ),
         AnyhowError,
     > {
+        Self::fetch_update_ix_inner(context, client, params, None).await
+    }
+
+    /// Fetches a classic PullFeed update while forwarding request-scoped task variables.
+    pub async fn fetch_update_ix_with_variable_overrides(
+        context: Arc<SbContext>,
+        client: &RpcClient,
+        params: FetchUpdateParams,
+        variable_overrides: HashMap<String, String>,
+    ) -> Result<
+        (
+            Instruction,
+            Vec<OracleResponse>,
+            usize,
+            Vec<AddressLookupTableAccount>,
+        ),
+        AnyhowError,
+    > {
+        let result =
+            Self::fetch_update_ix_inner(context, client, params, Some(variable_overrides.clone()))
+                .await;
+        result.map_err(|error| {
+            let rendered = format!("{error:#}");
+            let redacted = redact_override_values(&rendered, &variable_overrides);
+            if redacted == rendered {
+                error
+            } else {
+                anyhow!(redacted)
+            }
+        })
+    }
+
+    async fn fetch_update_ix_inner(
+        context: Arc<SbContext>,
+        client: &RpcClient,
+        params: FetchUpdateParams,
+        variable_overrides: Option<HashMap<String, String>>,
+    ) -> Result<
+        (
+            Instruction,
+            Vec<OracleResponse>,
+            usize,
+            Vec<AddressLookupTableAccount>,
+        ),
+        AnyhowError,
+    > {
         let latest_slot = SlotHashSysvar::get_latest_slothash(client)
             .await
             .context("PullFeed.fetchUpdateIx: Failed to fetch latest slot")?;
@@ -483,17 +544,30 @@ impl PullFeed {
                 as u32
         });
 
-        let price_signatures = gateway
-            .fetch_signatures_from_encoded_scaled(FetchSignaturesScaledParams {
-                recent_hash: Some(bs58::encode(latest_slot.hash).into_string()),
-                encoded_jobs: encoded_jobs.clone(),
-                num_signatures,
-                max_variance_scaled: feed_data.max_variance,
-                min_responses: Some(feed_data.min_responses),
-                use_timestamp: Some(false),
-            })
-            .await
-            .context("PullFeed.fetchUpdateIx: Failed to fetch signatures")?;
+        let signature_params = FetchSignaturesScaledParams {
+            recent_hash: Some(bs58::encode(latest_slot.hash).into_string()),
+            encoded_jobs: encoded_jobs.clone(),
+            num_signatures,
+            max_variance_scaled: feed_data.max_variance,
+            min_responses: Some(feed_data.min_responses),
+            use_timestamp: Some(false),
+        };
+        let price_signatures = match variable_overrides.as_ref() {
+            Some(variable_overrides) => {
+                gateway
+                    .fetch_signatures_from_encoded_scaled_with_variable_overrides(
+                        signature_params,
+                        variable_overrides,
+                    )
+                    .await
+            }
+            None => {
+                gateway
+                    .fetch_signatures_from_encoded_scaled(signature_params)
+                    .await
+            }
+        }
+        .context("PullFeed.fetchUpdateIx: Failed to fetch signatures")?;
 
         let returned_hashes = price_signatures
             .responses
@@ -549,7 +623,11 @@ impl PullFeed {
         let num_successes = usable_oracle_responses.len();
 
         if params.debug.unwrap_or(false) {
-            println!("priceSignatures: {:?}", price_signatures);
+            if variable_overrides.is_some() {
+                println!("priceSignatures: [redacted because variable overrides were supplied]");
+            } else {
+                println!("priceSignatures: {:?}", price_signatures);
+            }
         }
 
         if num_successes == 0 {
@@ -617,6 +695,40 @@ impl PullFeed {
         context: Arc<SbContext>,
         client: &RpcClient,
         params: FetchUpdateManyParams,
+    ) -> Result<(Vec<Instruction>, Vec<AddressLookupTableAccount>), AnyhowError> {
+        Self::fetch_update_consensus_ix_inner(context, client, params, None).await
+    }
+
+    /// Fetches classic PullFeed consensus updates with request-scoped task variables.
+    pub async fn fetch_update_consensus_ix_with_variable_overrides(
+        context: Arc<SbContext>,
+        client: &RpcClient,
+        params: FetchUpdateManyParams,
+        variable_overrides: HashMap<String, String>,
+    ) -> Result<(Vec<Instruction>, Vec<AddressLookupTableAccount>), AnyhowError> {
+        let result = Self::fetch_update_consensus_ix_inner(
+            context,
+            client,
+            params,
+            Some(variable_overrides.clone()),
+        )
+        .await;
+        result.map_err(|error| {
+            let rendered = format!("{error:#}");
+            let redacted = redact_override_values(&rendered, &variable_overrides);
+            if redacted == rendered {
+                error
+            } else {
+                anyhow!(redacted)
+            }
+        })
+    }
+
+    async fn fetch_update_consensus_ix_inner(
+        context: Arc<SbContext>,
+        client: &RpcClient,
+        params: FetchUpdateManyParams,
+        variable_overrides: Option<HashMap<String, String>>,
     ) -> Result<(Vec<Instruction>, Vec<AddressLookupTableAccount>), AnyhowError> {
         if params.feeds.is_empty() {
             return Err(anyhow!(
@@ -687,17 +799,34 @@ impl PullFeed {
             .context("PullFeed.fetchUpdateIx: Failed to fetch latest slot")?;
 
         // Call the gateway consensus endpoint and fetch signatures
-        let price_signatures = gateway
-            .fetch_signatures_consensus_scaled(FetchSignaturesConsensusScaledParams {
-                recent_hash: Some(bs58::encode(latest_slot.hash).into_string()),
-                num_signatures: Some(num_signatures),
-                feed_configs,
-                use_timestamp: Some(false),
-            })
-            .await
-            .context("PullFeed.fetchUpdateIx: fetch signatures consensus failure")?;
+        let signature_params = FetchSignaturesConsensusScaledParams {
+            recent_hash: Some(bs58::encode(latest_slot.hash).into_string()),
+            num_signatures: Some(num_signatures),
+            feed_configs,
+            use_timestamp: Some(false),
+        };
+        let price_signatures = match variable_overrides.as_ref() {
+            Some(variable_overrides) => {
+                gateway
+                    .fetch_signatures_consensus_scaled_with_variable_overrides(
+                        signature_params,
+                        variable_overrides,
+                    )
+                    .await
+            }
+            None => {
+                gateway
+                    .fetch_signatures_consensus_scaled(signature_params)
+                    .await
+            }
+        }
+        .context("PullFeed.fetchUpdateIx: fetch signatures consensus failure")?;
         if params.debug.unwrap_or(false) {
-            println!("priceSignatures: {:?}", price_signatures);
+            if variable_overrides.is_some() {
+                println!("priceSignatures: [redacted because variable overrides were supplied]");
+            } else {
+                println!("priceSignatures: {:?}", price_signatures);
+            }
         }
 
         let validated = validate_consensus_response(&price_signatures, &requested_feeds)?;
@@ -831,6 +960,18 @@ mod tests {
         assert!(!has_failure_error("   "));
         assert!(!has_failure_error("[]"));
         assert!(has_failure_error("Stale submission"));
+    }
+
+    #[test]
+    fn override_values_are_redacted_from_returned_errors() {
+        let overrides = HashMap::from([
+            ("PYTH_API_KEY".to_string(), "long-secret-value".to_string()),
+            ("SHORT".to_string(), "secret".to_string()),
+            ("EMPTY".to_string(), String::new()),
+        ]);
+        let redacted = redact_override_values("long-secret-value and secret", &overrides);
+
+        assert_eq!(redacted, "[REDACTED] and [REDACTED]");
     }
 
     #[test]

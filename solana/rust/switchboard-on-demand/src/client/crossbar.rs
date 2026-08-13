@@ -12,6 +12,7 @@ use reqwest::Client;
 use rust_decimal::Decimal;
 use serde::de::Error as DeError;
 use serde::{Deserialize, Deserializer, Serialize};
+use std::collections::HashMap;
 use switchboard_protos::OracleFeed;
 use switchboard_utils::utils::median;
 use tokio::time::interval;
@@ -111,6 +112,50 @@ pub struct CrossbarSimulateProtoResponse {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct CrossbarOracleFeedFetchResponse {
     pub data: String, // Base64 encoded proto
+}
+
+fn redact_override_values(
+    text: &str,
+    variable_overrides: Option<&HashMap<String, String>>,
+) -> String {
+    let Some(variable_overrides) = variable_overrides else {
+        return text.to_string();
+    };
+    let mut redacted = text.to_string();
+    let mut values: Vec<&str> = variable_overrides
+        .values()
+        .map(String::as_str)
+        .filter(|value| !value.is_empty())
+        .collect();
+    values.sort_unstable_by_key(|value| std::cmp::Reverse(value.len()));
+    for value in values {
+        redacted = redacted.replace(value, "[REDACTED]");
+    }
+    redacted
+}
+
+fn redact_simulate_proto_response(
+    response: &mut CrossbarSimulateProtoResponse,
+    variable_overrides: &HashMap<String, String>,
+) {
+    for log in &mut response.logs {
+        *log = redact_override_values(log, Some(variable_overrides));
+    }
+}
+
+fn simulate_proto_error_log(
+    status: reqwest::StatusCode,
+    raw: &str,
+    variable_overrides: Option<&HashMap<String, String>>,
+) -> String {
+    if variable_overrides.is_some() {
+        format!(
+            "{}: [response body redacted because variable overrides were supplied]",
+            status
+        )
+    } else {
+        format!("{}: {}", status, raw)
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -541,6 +586,34 @@ impl CrossbarClient {
         include_receipts: bool,
         network: Option<&str>,
     ) -> Result<CrossbarSimulateProtoResponse, AnyhowError> {
+        self.simulate_proto_inner(feed_or_hash, include_receipts, network, None)
+            .await
+    }
+
+    /// Simulates an OracleFeed with request-scoped task variable overrides.
+    pub async fn simulate_proto_with_variable_overrides(
+        &self,
+        feed_or_hash: &str,
+        include_receipts: bool,
+        network: Option<&str>,
+        variable_overrides: HashMap<String, String>,
+    ) -> Result<CrossbarSimulateProtoResponse, AnyhowError> {
+        self.simulate_proto_inner(
+            feed_or_hash,
+            include_receipts,
+            network,
+            Some(&variable_overrides),
+        )
+        .await
+    }
+
+    async fn simulate_proto_inner(
+        &self,
+        feed_or_hash: &str,
+        include_receipts: bool,
+        network: Option<&str>,
+        variable_overrides: Option<&HashMap<String, String>>,
+    ) -> Result<CrossbarSimulateProtoResponse, AnyhowError> {
         let mut oracle_feed_b64 = feed_or_hash.to_string();
 
         // Simple heuristic: if it looks like a hash (hex, 64 chars or 66 with 0x), fetch it.
@@ -563,11 +636,20 @@ impl CrossbarClient {
         }
 
         let url = format!("{}/v2/simulate/proto", self.crossbar_url);
-        let payload = serde_json::json!({
+        let mut payload = serde_json::json!({
             "oracleFeed": oracle_feed_b64,
             "includeReceipts": include_receipts,
             "network": network.unwrap_or("mainnet"),
         });
+        if let Some(variable_overrides) = variable_overrides {
+            payload
+                .as_object_mut()
+                .expect("Crossbar simulation body must be a JSON object")
+                .insert(
+                    "variableOverrides".to_string(),
+                    serde_json::json!(variable_overrides),
+                );
+        }
 
         let resp = self
             .client
@@ -583,7 +665,13 @@ impl CrossbarClient {
 
         if !status.is_success() {
             if self.verbose {
-                eprintln!("{}: {}", status, raw);
+                eprintln!(
+                    "{}",
+                    simulate_proto_error_log(status, &raw, variable_overrides)
+                );
+            }
+            if variable_overrides.is_some() {
+                return Err(anyhow!("Bad status code {}", status.as_u16()));
             }
             return Err(anyhow!(
                 "Bad status code {} for simulate_proto. Response: {}",
@@ -592,13 +680,21 @@ impl CrossbarClient {
             ));
         }
 
-        serde_json::from_str(&raw).with_context(|| {
-            format!(
-                "Failed to parse simulate_proto response. URL: {}. Raw response (first 500 chars): {}",
-                url,
-                &raw.chars().take(500).collect::<String>()
-            )
-        })
+        let mut response: CrossbarSimulateProtoResponse = if variable_overrides.is_some() {
+            serde_json::from_str(&raw).context("Failed to parse response")?
+        } else {
+            serde_json::from_str(&raw).with_context(|| {
+                format!(
+                    "Failed to parse simulate_proto response. URL: {}. Raw response (first 500 chars): {}",
+                    url,
+                    &raw.chars().take(500).collect::<String>()
+                )
+            })?
+        };
+        if let Some(variable_overrides) = variable_overrides {
+            redact_simulate_proto_response(&mut response, variable_overrides);
+        }
+        Ok(response)
     }
 
     /// Fetch the Sui feed update from the crossbar gateway.
@@ -833,12 +929,165 @@ impl CrossbarClient {
 mod tests {
     use super::*;
     use crate::solana_compat::solana_sdk::instruction::{AccountMeta, Instruction};
+    use sha2::{Digest, Sha256};
     use std::str::FromStr;
 
     const ON_DEMAND_PROGRAM_ID_HEX: &str =
         "0673bd46f2e47e04f12bd92fb731968ecd9d9757c274da87476f465c040c6573";
     const CONSENSUS_DISCRIMINATOR: [u8; 8] = [0xef, 0x7c, 0x27, 0xb8, 0x93, 0xde, 0x10, 0xf8];
     const PLACEHOLDER_DISCRIMINATOR: [u8; 8] = [1, 2, 3, 4, 5, 6, 7, 8];
+
+    async fn capture_request(
+        status: &'static str,
+        response_body: &'static str,
+    ) -> (String, tokio::sync::oneshot::Receiver<serde_json::Value>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut buffer = [0_u8; 4096];
+
+            let body_start = loop {
+                let bytes_read = tokio::io::AsyncReadExt::read(&mut stream, &mut buffer)
+                    .await
+                    .unwrap();
+                assert_ne!(bytes_read, 0, "request ended before its headers");
+                request.extend_from_slice(&buffer[..bytes_read]);
+
+                if let Some(header_end) = request.windows(4).position(|bytes| bytes == b"\r\n\r\n")
+                {
+                    let body_start = header_end + 4;
+                    let headers = std::str::from_utf8(&request[..header_end]).unwrap();
+                    let content_length = headers
+                        .lines()
+                        .find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            name.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse::<usize>().unwrap())
+                        })
+                        .unwrap_or(0);
+                    if request.len() >= body_start + content_length {
+                        break body_start;
+                    }
+                }
+            };
+
+            sender
+                .send(serde_json::from_slice(&request[body_start..]).unwrap())
+                .unwrap();
+
+            let response = format!(
+                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response_body}",
+                response_body.len()
+            );
+            tokio::io::AsyncWriteExt::write_all(&mut stream, response.as_bytes())
+                .await
+                .unwrap();
+        });
+
+        (format!("http://{address}"), receiver)
+    }
+
+    #[tokio::test]
+    async fn simulate_proto_forwards_camel_case_overrides_without_changing_feed_bytes() {
+        let secret = "request-scoped-pyth-secret";
+        let oracle_feed = "ZmVlZA==";
+
+        let (url, request) = capture_request(
+            "200 OK",
+            r#"{"feedHash":"hash","results":["1.25"],"logs":["request-scoped-pyth-secret"]}"#,
+        )
+        .await;
+        let response = CrossbarClient::new(&url, false)
+            .simulate_proto_with_variable_overrides(
+                oracle_feed,
+                true,
+                Some("mainnet"),
+                HashMap::from([("PYTH_API_KEY".to_string(), secret.to_string())]),
+            )
+            .await
+            .unwrap();
+        let override_request = request.await.unwrap();
+        assert_eq!(
+            override_request["variableOverrides"]["PYTH_API_KEY"],
+            secret
+        );
+        assert!(override_request.get("variable_overrides").is_none());
+        assert_eq!(override_request["oracleFeed"], oracle_feed);
+        assert_eq!(response.feedHash.as_deref(), Some("hash"));
+        assert_eq!(response.results, vec!["1.25".to_string()]);
+        assert!(response.logs.iter().all(|log| !log.contains(secret)));
+
+        let (url, request) =
+            capture_request("200 OK", r#"{"feedHash":"hash","results":[],"logs":[]}"#).await;
+        CrossbarClient::new(&url, false)
+            .simulate_proto(oracle_feed, true, Some("mainnet"))
+            .await
+            .unwrap();
+        let legacy_request = request.await.unwrap();
+        assert!(legacy_request.get("variableOverrides").is_none());
+        assert!(legacy_request.get("variable_overrides").is_none());
+        assert_eq!(legacy_request["oracleFeed"], override_request["oracleFeed"]);
+        let override_hash = Sha256::digest(
+            BASE64_STANDARD
+                .decode(override_request["oracleFeed"].as_str().unwrap())
+                .unwrap(),
+        );
+        let legacy_hash = Sha256::digest(
+            BASE64_STANDARD
+                .decode(legacy_request["oracleFeed"].as_str().unwrap())
+                .unwrap(),
+        );
+        assert_eq!(override_hash, legacy_hash);
+        let mut override_request_without_metadata = override_request;
+        override_request_without_metadata
+            .as_object_mut()
+            .unwrap()
+            .remove("variableOverrides");
+        assert_eq!(override_request_without_metadata, legacy_request);
+    }
+
+    #[tokio::test]
+    async fn simulate_proto_does_not_expose_override_values_in_errors() {
+        let secret = "request-scoped-pyth-secret";
+        let response_body: &'static str =
+            "upstream echoed request-scoped-pyth-secret while handling the request";
+        let (url, _request) = capture_request("500 Internal Server Error", response_body).await;
+        let overrides = HashMap::from([("PYTH_API_KEY".to_string(), secret.to_string())]);
+
+        let verbose_log = simulate_proto_error_log(
+            reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+            r#"{"error":"upstream echoed request-scoped-pyth-secret"}"#,
+            Some(&overrides),
+        );
+        assert!(!verbose_log.contains(secret));
+        assert!(verbose_log.contains("response body redacted"));
+
+        let error = CrossbarClient::new(&url, false)
+            .simulate_proto_with_variable_overrides("ZmVlZA==", false, None, overrides.clone())
+            .await
+            .unwrap_err();
+
+        assert!(!error.to_string().contains(secret));
+        assert_eq!(error.to_string(), "Bad status code 500");
+
+        let (url, _request) = capture_request("200 OK", response_body).await;
+        let parse_error = CrossbarClient::new(&url, false)
+            .simulate_proto_with_variable_overrides("ZmVlZA==", false, None, overrides)
+            .await
+            .unwrap_err();
+        assert!(!parse_error.to_string().contains(secret));
+
+        let (url, _request) = capture_request("500 Internal Server Error", response_body).await;
+        let legacy_error = CrossbarClient::new(&url, false)
+            .simulate_proto("ZmVlZA==", false, None)
+            .await
+            .unwrap_err();
+        assert!(legacy_error.to_string().contains(response_body));
+    }
 
     fn on_demand_program_id() -> Pubkey {
         let bytes: [u8; 32] = hex::decode(ON_DEMAND_PROGRAM_ID_HEX)

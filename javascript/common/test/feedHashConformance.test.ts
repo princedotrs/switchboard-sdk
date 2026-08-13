@@ -56,7 +56,7 @@ describe('Rust-compatible feed-hash conformance', () => {
       [vectors.pythPush.job]
     ).toString('hex');
 
-    expect(bytes).toHaveLength(287);
+    expect(bytes).toHaveLength(304);
     expect(bytes.toString('hex')).toBe(
       vectors.pythPush.expectedLengthDelimitedHex
     );
@@ -76,6 +76,9 @@ describe('Rust-compatible feed-hash conformance', () => {
     expect(
       medianJob?.[1]?.tasks?.[0]?.oracleTask?.pythConfigs?.pushFeedShardId
     ).toBe(0);
+    expect(
+      medianJob?.[1]?.tasks?.[0]?.oracleTask?.pythConfigs?.apiKey
+    ).toBe('${PYTH_API_KEY}');
     expect(
       medianJob?.[2]?.tasks?.[1]?.divideTask?.job?.tasks?.[0]?.jupiterSwapTask
         ?.directRoutesOnly

@@ -38,7 +38,7 @@ if (order === 'old-last') require('@switchboard-xyz/common-old');
 const after = computeIdentity();
 
 for (const identity of [before, after]) {
-  assert.equal(identity.bytes.length, 287);
+  assert.equal(identity.bytes.length, expectedBytesHex.length / 2);
   assert.equal(Buffer.from(identity.bytes).toString('hex'), expectedBytesHex);
   assert.equal(identity.hash, expectedHash);
   assert.ok(!rejectedHashes.has(identity.hash));
