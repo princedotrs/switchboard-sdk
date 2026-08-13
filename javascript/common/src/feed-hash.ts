@@ -1,5 +1,7 @@
-import { type IOracleJob, isHex, OracleJob } from './index.js';
-import { IOracleFeed, OracleFeed } from './protos.js';
+import { serializeOracleFeed } from './utils/oracle-feed.js';
+import { serializeOracleJob } from './utils/oracle-job.js';
+import { type IOracleJob, isHex } from './index.js';
+import type { IOracleFeed } from './protos.js';
 
 import { Buffer } from 'buffer';
 import { sha256 } from 'js-sha256';
@@ -62,7 +64,7 @@ export class FeedHash {
     const hasher = sha256.create();
     hasher.update(queue);
     jobs.forEach((job: IOracleJob) => {
-      hasher.update(OracleJob.encodeDelimited(job).finish());
+      hasher.update(serializeOracleJob(job));
     });
     return Buffer.from(hasher.digest());
   }
@@ -72,7 +74,7 @@ export class FeedHash {
    */
   static computeOracleFeedId(feed: IOracleFeed): Buffer {
     const hasher = sha256.create();
-    hasher.update(OracleFeed.encodeDelimited(feed).finish());
+    hasher.update(serializeOracleFeed(feed));
     return Buffer.from(hasher.digest());
   }
 

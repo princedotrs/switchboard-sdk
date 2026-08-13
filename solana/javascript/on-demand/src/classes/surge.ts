@@ -4,7 +4,10 @@ import {
   SPL_SYSVAR_INSTRUCTIONS_ID,
   SPL_SYSVAR_SLOT_HASHES_ID,
 } from '../constants.js';
-import { Ed25519InstructionUtils } from '../instruction-utils/ed25519-instruction-utils.js';
+import {
+  ED25519_CURRENT_INSTRUCTION_INDEX,
+  Ed25519InstructionUtils,
+} from '../instruction-utils/ed25519-instruction-utils.js';
 import { Gateway } from '../oracle-interfaces/gateway.js';
 import { isMainnetConnection } from '../utils/index.js';
 import { SignatureAuth } from '../utils/signatureAuth.js';
@@ -294,13 +297,13 @@ export class SurgeUpdate {
    *
    * @param queuePubkey - The queue public key for deriving the oracle account
    * @param payer - The payer public key for the transaction
-   * @param instructionIdx - The instruction index (defaults to 0)
+   * @param instructionIdx - Legacy absolute instruction index. Omit when using `asV0Tx`, or finalize custom transaction arrays with `finalizeManagedUpdateInstructions`.
    * @returns Array of [Ed25519 verification instruction, quote program update instruction]
    */
   toQuoteIx(
     queuePubkey: web3.PublicKey,
     payer: web3.PublicKey,
-    instructionIdx: number = 0
+    instructionIdx?: number
   ): web3.TransactionInstruction[] {
     const response = this.rawResponse;
 
@@ -335,7 +338,7 @@ export class SurgeUpdate {
     // Build the Ed25519 instruction
     const ed25519Instruction = Ed25519InstructionUtils.buildEd25519Instruction(
       [ed25519Signature],
-      instructionIdx,
+      instructionIdx ?? ED25519_CURRENT_INSTRUCTION_INDEX,
       response.oracle_response.slot, // recent_slot from oracle response
       0 // version 0 for Ed25519 v0 scheme
     );
@@ -385,7 +388,7 @@ export class SurgeUpdate {
           isWritable: false,
         }, // system_program [6]
       ],
-      data: Buffer.from([opcode, instructionIdx, bump]), // [opcode, ix_idx, bump]
+      data: Buffer.from([opcode, instructionIdx ?? 0, bump]), // [opcode, ix_idx, bump]
     });
 
     return [ed25519Instruction, quoteProgramIx];

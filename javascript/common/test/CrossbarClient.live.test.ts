@@ -1,7 +1,7 @@
 import { IxFromHex } from '../src/utils/instructions.js';
 
 import { PublicKey } from '@solana/web3.js';
-import axios from 'axios';
+import axios, { type AxiosResponse } from 'axios';
 import { expect } from 'chai';
 
 type RawSolanaUpdateResponse = {
@@ -20,10 +20,25 @@ type SolanaSimulationResponse = {
   variance: string;
 };
 
-const crossbarUrl = 'https://crossbar.switchboard.xyz';
+const crossbarUrl = (
+  process.env.CROSSBAR_LIVE_BASE_URL ?? 'https://crossbar.switchboard.xyz'
+).replace(/\/$/, '');
+const client = axios.create({
+  timeout: 15_000,
+  validateStatus: () => true,
+});
 
-describe('Crossbar Solana Integration Tests', () => {
-  test('Fetching Solana updates decodes instruction payloads.', async () => {
+function requireSuccess<T>(response: AxiosResponse<T>, operation: string): T {
+  if (response.status < 200 || response.status >= 300) {
+    throw new Error(
+      `${operation} returned HTTP ${response.status}: ${JSON.stringify(response.data)}`
+    );
+  }
+  return response.data;
+}
+
+describe('Crossbar Solana live canary', () => {
+  test('fetches Solana updates and decodes instruction payloads', async () => {
     const network = 'devnet';
     const feeds = [
       'FAmE211gC241L5YTAssfUT3h2dHcUygVGFbz2hHBKNWG',
@@ -31,17 +46,16 @@ describe('Crossbar Solana Integration Tests', () => {
     ];
     const numSignatures = 2;
 
-    const updates = await axios
-      .get<RawSolanaUpdateResponse[]>(
-        `${crossbarUrl}/updates/solana/${network}/${feeds.join(',')}`,
-        {
-          params: {
-            payer: 'nXsE22JSmWYk7f4KtfjXVqCvGuaVXntdSbCKzdumzFv',
-            numSignatures,
-          },
-        }
-      )
-      .then(resp => resp.data);
+    const response = await client.get<RawSolanaUpdateResponse[]>(
+      `${crossbarUrl}/updates/solana/${network}/${feeds.join(',')}`,
+      {
+        params: {
+          payer: 'nXsE22JSmWYk7f4KtfjXVqCvGuaVXntdSbCKzdumzFv',
+          numSignatures,
+        },
+      }
+    );
+    const updates = requireSuccess(response, 'Solana update request');
 
     expect(updates).to.be.an('array');
     expect(updates).to.have.lengthOf(feeds.length);
@@ -61,12 +75,12 @@ describe('Crossbar Solana Integration Tests', () => {
       });
 
       expect(update.responses).to.be.an('array').that.is.not.empty;
-      update.responses.forEach(response => {
-        expect(response.oracle).to.be.a('string').and.not.empty;
-        if (response.result !== null) {
-          expect(Number.isFinite(response.result)).to.be.true;
+      update.responses.forEach(oracleResponse => {
+        expect(oracleResponse.oracle).to.be.a('string').and.not.empty;
+        if (oracleResponse.result !== null) {
+          expect(Number.isFinite(oracleResponse.result)).to.be.true;
         }
-        expect(response.errors).to.be.a('string');
+        expect(oracleResponse.errors).to.be.a('string');
       });
 
       expect(update.lookupTables).to.be.an('array').that.is.not.empty;
@@ -74,20 +88,22 @@ describe('Crossbar Solana Integration Tests', () => {
         expect(lookupTable).to.be.a('string').and.not.empty;
       });
     });
-  }, 10_000);
+  });
 
-  test('Simulating Solana feeds returns aggregate response fields.', async () => {
+  test('simulates Solana feeds and returns aggregate fields', async () => {
     const network = 'devnet';
     const feeds = [
       'AXRydnjDeWUgR5VGFFqtzYv52u2MHqFCYcsHsnEgCD15',
       '7yQ4ae7XH4tdiXXbzdsycUjFEWAhonVXLcR1vreqGT3s',
     ];
 
-    const simulationResults = await axios
-      .get<SolanaSimulationResponse[]>(
-        `${crossbarUrl}/simulate/solana/${network}/${feeds.join(',')}`
-      )
-      .then(resp => resp.data);
+    const response = await client.get<SolanaSimulationResponse[]>(
+      `${crossbarUrl}/simulate/solana/${network}/${feeds.join(',')}`
+    );
+    const simulationResults = requireSuccess(
+      response,
+      'Solana simulation request'
+    );
 
     expect(simulationResults).to.be.an('array');
     expect(simulationResults).to.have.lengthOf(feeds.length);
@@ -103,5 +119,5 @@ describe('Crossbar Solana Integration Tests', () => {
       expect(result.stdev).to.be.a('string').and.not.empty;
       expect(result.variance).to.be.a('string').and.not.empty;
     });
-  }, 10_000);
+  });
 });

@@ -33,13 +33,11 @@
  *
  * // Fetch and verify price in your transaction
  * const pullIx = await queue.fetchQuoteIx(
- *   gateway,
  *   crossbar,
  *   ['0xabc123...'], // Feed hashes
  *   {
  *     numSignatures: 1,
- *     variableOverrides: {},
- *     instructionIdx: 0
+ *     variableOverrides: {}
  *   }
  * );
  *
@@ -65,6 +63,7 @@
  * const [quoteAccount] = sb.OracleQuote.getCanonicalPubkey(queue.pubkey, [feedHash]);
  *
  * // Fetch Ed25519 verification and quote-program update instructions.
+ * // asV0Tx resolves their final transaction indices automatically.
  * const updateIxs = await queue.fetchManagedUpdateIxs(crossbar, [feedHash], {
  *   numSignatures: 3,
  *   payer: payer.publicKey,
@@ -93,6 +92,7 @@ export * from './classes/index.js';
 export * from './constants.js';
 export * from './event-utils/index.js';
 export * as EVM from './evm/index.js';
+export * from './feeds/index.js';
 export * from './instruction-utils/index.js';
 export * from './oracle-interfaces/index.js';
 export * from './randomness-inspection.js';

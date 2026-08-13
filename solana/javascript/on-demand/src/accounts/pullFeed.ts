@@ -123,6 +123,17 @@ export function isSuccessfulOracleResponse(
   return value !== null && !hasOracleFailure(error);
 }
 
+const MAX_SAFE_INTEGER_BN = new BN(Number.MAX_SAFE_INTEGER.toString());
+
+function maxVarianceScaledToSafeNumber(maxVariance: BN): number {
+  if (maxVariance.isNeg() || maxVariance.gt(MAX_SAFE_INTEGER_BN)) {
+    throw new Error(
+      'PullFeed maxVariance exceeds the non-negative JavaScript safe-integer range required by gateway v1'
+    );
+  }
+  return maxVariance.toNumber();
+}
+
 function padStringWithNullBytes(
   input: string,
   desiredLength: number = 32
@@ -154,6 +165,48 @@ function getIsSolana(chain?: string) {
 
 function getIsMainnet(network?: string) {
   return network === 'mainnet' || network === 'mainnet-beta';
+}
+
+function normalizeReturnedFeedHash(feedHash: string): string {
+  const normalized = feedHash.toLowerCase();
+  return normalized.startsWith('0x') ? normalized.slice(2) : normalized;
+}
+
+function matchMedianResponseFeeds(
+  requestedFeedsByHash: Map<string, web3.PublicKey[]>,
+  returnedFeedHashes: string[]
+): web3.PublicKey[] {
+  const normalizedReturnedHashes = returnedFeedHashes.map(feedHash =>
+    normalizeReturnedFeedHash(feedHash)
+  );
+  const matchedCounts = new Map<string, number>();
+  const matchedFeeds: web3.PublicKey[] = [];
+  const unexpectedHashes: string[] = [];
+
+  for (const feedHash of normalizedReturnedHashes) {
+    const requestedFeeds = requestedFeedsByHash.get(feedHash);
+    const matchedCount = matchedCounts.get(feedHash) ?? 0;
+    const matchedFeed = requestedFeeds?.[matchedCount];
+    if (!matchedFeed) {
+      unexpectedHashes.push(feedHash);
+      continue;
+    }
+    matchedFeeds.push(matchedFeed);
+    matchedCounts.set(feedHash, matchedCount + 1);
+  }
+
+  if (unexpectedHashes.length > 0) {
+    const expectedHashes = [...requestedFeedsByHash.keys()];
+    throw new Error(
+      [
+        '[Switchboard] Gateway returned an unexpected median response feed hash.',
+        `Expected hashes: [${expectedHashes.join(', ')}].`,
+        `Returned hashes: [${normalizedReturnedHashes.join(', ')}].`,
+      ].join(' ')
+    );
+  }
+
+  return matchedFeeds;
 }
 
 /**
@@ -689,7 +742,8 @@ export class PullFeed {
     if (force || !this.configs) {
       this.configs = await (async () => {
         const data = await this.loadData();
-        const maxVariance = data.maxVariance.toNumber() / 1e9;
+        const maxVariance =
+          maxVarianceScaledToSafeNumber(data.maxVariance) / 1e9;
         return {
           queue: data.queue,
           maxVariance: maxVariance,
@@ -853,6 +907,7 @@ export class PullFeed {
 
     const queue: web3.PublicKey = feedDatas[0]?.queue ?? web3.PublicKey.default;
     const feedConfigs: FeedRequest[] = [];
+    const requestedFeedsByHash = new Map<string, web3.PublicKey[]>();
     for (let idx = 0; idx < feedDatas.length; idx++) {
       const data = feedDatas[idx];
       if (!data) {
@@ -861,9 +916,14 @@ export class PullFeed {
       } else if (!queue.equals(data.queue)) {
         throw new Error('All feeds must be on the same queue');
       }
+      const feedHash = Buffer.from(data.feedHash).toString('hex');
+      requestedFeedsByHash.set(feedHash, [
+        ...(requestedFeedsByHash.get(feedHash) ?? []),
+        feeds[idx].pubkey,
+      ]);
       const legacyClient = new LegacyCrossbarClient(crossbarClient.crossbarUrl);
       feedConfigs.push({
-        maxVariance: data.maxVariance.toNumber() / 1e9,
+        maxVarianceScaled: maxVarianceScaledToSafeNumber(data.maxVariance),
         minResponses: data.minResponses,
         jobs: await legacyClient
           .fetch(Buffer.from(data.feedHash).toString('hex'))
@@ -878,6 +938,7 @@ export class PullFeed {
         crossbarClient,
         feedConfigs,
         numSignatures: params.numSignatures,
+        variableOverrides: params.variableOverrides,
         // useEd25519 will default to false (secp256k1) for backward compatibility
       }
     );
@@ -886,6 +947,13 @@ export class PullFeed {
     if (!response.oracle_responses || response.oracle_responses.length === 0) {
       throw new Error('No oracle responses received from gateway');
     }
+
+    // Failed requested feeds may be omitted, but every returned hash must map
+    // to an on-chain feed before any signature or submit instruction is built.
+    const feedPubkeys = matchMedianResponseFeeds(
+      requestedFeedsByHash,
+      response.median_responses.map(({ feed_hash }) => feed_hash)
+    );
 
     // Collect error messages from any oracles that failed
     const oracleErrors: string[] = [];
@@ -951,16 +1019,7 @@ export class PullFeed {
     // Prepare the remaining accounts for the `pullFeedSubmitResponseManySecp` instruction.
     //
 
-    // We only want to include feeds that have succcessful responses returned.
-    const feedPubkeys = response.median_responses.map(median_response => {
-      // For each successful 'median' response, locate a feed that has the same corresponding feed hash.
-      const feedIndex = feedDatas.findIndex(data => {
-        const feedHashHex = Buffer.from(data!.feedHash).toString('hex');
-        return feedHashHex === median_response.feed_hash;
-      });
-      if (feedIndex >= 0) return feeds[feedIndex].pubkey;
-      return web3.PublicKey.default;
-    });
+    // Only feeds with successful median responses are included.
     // For each oracle response, create the oracle and oracle stats accounts.
     const oraclePubkeys = response.oracle_responses.map(response => {
       return new web3.PublicKey(Buffer.from(response.oracle_pubkey, 'hex'));
@@ -1050,6 +1109,7 @@ export class PullFeed {
     const feedDatas = await PullFeed.loadMany(program, params.feeds);
     const queue: web3.PublicKey = feedDatas[0]?.queue ?? web3.PublicKey.default;
     const feedConfigs: FeedRequest[] = [];
+    const requestedFeedsByHash = new Map<string, web3.PublicKey[]>();
     for (let idx = 0; idx < feedDatas.length; idx++) {
       const data = feedDatas[idx];
       if (!data) {
@@ -1058,8 +1118,13 @@ export class PullFeed {
       } else if (!queue.equals(data.queue)) {
         throw new Error('All feeds must be on the same queue');
       }
+      const feedHash = Buffer.from(data.feedHash).toString('hex');
+      requestedFeedsByHash.set(feedHash, [
+        ...(requestedFeedsByHash.get(feedHash) ?? []),
+        feeds[idx].pubkey,
+      ]);
       feedConfigs.push({
-        maxVariance: data.maxVariance.toNumber() / 1e9,
+        maxVarianceScaled: maxVarianceScaledToSafeNumber(data.maxVariance),
         minResponses: data.minResponses,
         jobs: await params.feeds[idx].loadJobs(crossbarClient),
       });
@@ -1088,6 +1153,13 @@ export class PullFeed {
     if (!response.oracle_responses || response.oracle_responses.length === 0) {
       throw new Error('No oracle responses received from gateway');
     }
+
+    // Failed requested feeds may be omitted, but every returned hash must map
+    // to an on-chain feed before any signature or submit instruction is built.
+    const feedPubkeys = matchMedianResponseFeeds(
+      requestedFeedsByHash,
+      response.median_responses.map(({ feed_hash }) => feed_hash)
+    );
 
     // Collect error messages from any oracles that failed
     const oracleErrors: string[] = [];
@@ -1153,21 +1225,7 @@ export class PullFeed {
     // Prepare the remaining accounts for the `pullFeedSubmitResponseManySecp` instruction.
     //
 
-    // We only want to include feeds that have succcessful responses returned.
-    const feedPubkeys: web3.PublicKey[] = response.median_responses.map(
-      median_response => {
-        // For each successful 'median' response, locate a feed that has the same corresponding feed hash.
-        const feedIndex = feedDatas.findIndex(data => {
-          const feedHashHex = Buffer.from(data!.feedHash).toString('hex');
-          return feedHashHex === median_response.feed_hash;
-        });
-        if (feedIndex >= 0) return params.feeds[feedIndex].pubkey;
-        if (debug) {
-          console.warn(`Feed not found for hash: ${median_response.feed_hash}`);
-        }
-        return web3.PublicKey.default;
-      }
-    );
+    // Only feeds with successful median responses are included.
     // For each oracle response, create the oracle and oracle stats accounts.
     const oraclePubkeys = response.oracle_responses.map(response => {
       return new web3.PublicKey(Buffer.from(response.oracle_pubkey, 'hex'));

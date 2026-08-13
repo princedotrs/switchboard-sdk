@@ -10,6 +10,13 @@ import type { IOracleFeed, IOracleJob } from '../protos.js';
 export type FeedRequestV1 = {
   /** Maximum allowed variance as a human percent; Gateway helpers scale by 1e9 (1.0 = 1%). */
   maxVariance?: number;
+  /**
+   * Maximum allowed variance already scaled by 1e9.
+   *
+   * Use this when forwarding an exact on-chain value. Do not provide it
+   * together with `maxVariance`.
+   */
+  maxVarianceScaled?: number;
   /** Minimum number of job responses required, unscaled. */
   minResponses?: number;
   /** Array of oracle job definitions */

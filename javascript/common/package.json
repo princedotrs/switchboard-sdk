@@ -1,6 +1,6 @@
 {
   "name": "@switchboard-xyz/common",
-  "version": "5.8.2",
+  "version": "5.8.5",
   "description": "common type definitions and utils for interacting with switchboard",
   "license": "MIT",
   "type": "module",
@@ -120,7 +120,8 @@
   ],
   "scripts": {
     "prebuild": "pnpm lint",
-    "build": "pnpm exec rimraf dist && node ./compile-protos.js && echo '!src/esm-utils.js' >> .gitignore",
+    "build": "pnpm exec rimraf dist && node ./compile-protos.js",
+    "check:generated-protos": "node ./scripts/check-generated-protos.mjs",
     "clean": "pnpm exec rimraf node_modules dist .turbo",
     "docs": "typedoc",
     "docs:deploy": "pnpm docs && netlify deploy --prod --dir=$PWD/docs",
@@ -128,7 +129,8 @@
     "lint:fix": "eslint \"src/**/*.ts\" --ignore-pattern \"src/**/*.d.ts\" --fix",
     "prepack": "pnpm build",
     "test": "pnpm exec jest",
-    "test:bun": "bun exec jest"
+    "test:bun": "bun exec jest",
+    "test:live": "pnpm exec jest --config jest.live.config.ts --runInBand"
   },
   "dependencies": {
     "@solana/web3.js": "^1.98.2",

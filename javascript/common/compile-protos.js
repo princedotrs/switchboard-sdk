@@ -24,12 +24,15 @@ const rootBinPath = path.relative(
   path.join(__dirname, '..', '..', 'node_modules', '.bin')
 );
 
-const pbjsPath = fs.existsSync(path.join(rootBinPath, 'pbjs'))
-  ? rootBinPath
-  : binPath;
 const pbtsPath = fs.existsSync(path.join(rootBinPath, 'pbts'))
   ? rootBinPath
   : binPath;
+const canonicalPbjsPath = path.join(
+  projectRoot,
+  'scripts',
+  'canonical-pbjs.mjs'
+);
+const canonicalPbjs = `${process.execPath} ${canonicalPbjsPath}`;
 
 ['dist'].forEach(file => {
   fs.rmSync(file, { recursive: true, force: true });
@@ -90,7 +93,7 @@ async function main() {
 
   // Create protos in the src/protos directory
   execSync(
-    `${rootBinPath}/shx mkdir -p src/protos; ${pbjsPath}/pbjs --alt-comment --root oracle_job -t static-module --es6 -w es6 -o src/protos/index.js ${protosDir}/*.proto && ${pbtsPath}/pbts -o src/protos/index.d.ts src/protos/index.js;`,
+    `${rootBinPath}/shx mkdir -p src/protos; ${canonicalPbjs} --alt-comment --root oracle_job -t static-module --es6 -w es6 -o src/protos/index.js ${protosDir}/*.proto && ${pbtsPath}/pbts -o src/protos/index.d.ts src/protos/index.js;`,
     { encoding: 'utf-8' }
   );
   insertStringBeforeSync(
@@ -143,7 +146,7 @@ async function main() {
   // Create protos in the dist/cjs/protos
   execSync(`${rootBinPath}/tsc -p tsconfig.cjs.json`, { encoding: 'utf-8' });
   execSync(
-    `${rootBinPath}/shx rm -rf dist/cjs/protos; ${rootBinPath}/shx mkdir -p dist/cjs/protos; ${pbjsPath}/pbjs --alt-comment --root oracle_job -t static-module -o dist/cjs/protos/index.js ${protosDir}/*.proto && ${pbtsPath}/pbts -o dist/cjs/protos/index.d.ts dist/cjs/protos/index.js`,
+    `${rootBinPath}/shx rm -rf dist/cjs/protos; ${rootBinPath}/shx mkdir -p dist/cjs/protos; ${canonicalPbjs} --alt-comment --root oracle_job -t static-module -o dist/cjs/protos/index.js ${protosDir}/*.proto && ${pbtsPath}/pbts -o dist/cjs/protos/index.d.ts dist/cjs/protos/index.js`,
     { encoding: 'utf-8' }
   );
   insertStringBeforeSync(
@@ -190,7 +193,7 @@ async function main() {
   // Create ESM protos in the dist/esm/protos
   execSync(`${rootBinPath}/tsc`, { encoding: 'utf-8' });
   execSync(
-    `${rootBinPath}/shx rm -rf dist/esm/protos; ${rootBinPath}/shx mkdir -p dist/esm/protos; ${pbjsPath}/pbjs --alt-comment --root oracle_job -t static-module --es6 -w es6 -o dist/esm/protos/index.js ${protosDir}/*.proto && ${pbtsPath}/pbts -o dist/esm/protos/index.d.ts dist/esm/protos/index.js && ${rootBinPath}/shx --silent sed  -i 'protobufjs/minimal' 'protobufjs/minimal.js' dist/esm/protos/index.js > '/dev/null' 2>&1 && ${rootBinPath}/shx --silent sed -i 'import \\* as' 'import' dist/esm/protos/index.js > '/dev/null' 2>&1`,
+    `${rootBinPath}/shx rm -rf dist/esm/protos; ${rootBinPath}/shx mkdir -p dist/esm/protos; ${canonicalPbjs} --alt-comment --root oracle_job -t static-module --es6 -w es6 -o dist/esm/protos/index.js ${protosDir}/*.proto && ${pbtsPath}/pbts -o dist/esm/protos/index.d.ts dist/esm/protos/index.js && ${rootBinPath}/shx --silent sed  -i 'protobufjs/minimal' 'protobufjs/minimal.js' dist/esm/protos/index.js > '/dev/null' 2>&1 && ${rootBinPath}/shx --silent sed -i 'import \\* as' 'import' dist/esm/protos/index.js > '/dev/null' 2>&1`,
     { encoding: 'utf-8' }
   );
   insertStringBeforeSync(

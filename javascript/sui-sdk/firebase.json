@@ -1,0 +1,9 @@
+{
+  "hosting": [
+    {
+      "site": "switchboard-sui-sdk",
+      "public": "docs",
+      "rewrites": [{ "source": "**", "destination": "/index.html" }]
+    }
+  ]
+}
