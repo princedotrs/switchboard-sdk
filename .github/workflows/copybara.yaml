@@ -3,11 +3,17 @@ name: Copybara
 on:
   pull_request:
     branches:
-        - main
+      - main
+    paths:
+      - SDK_RELEASE_NOTES.md
+      - solana/javascript/on-demand/**
+      - solana/rust/switchboard-on-demand/**
+      - solana/rust/switchboard-on-demand-client/**
 
 jobs:
   copybara:
     name: Sync switchboard-sdk repo with sbv3 main branch
+    if: github.head_ref != 'copybara/sbv3-sync'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/create-github-app-token@v3
